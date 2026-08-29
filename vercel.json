@@ -1,9 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [
+  "redirects": [
     {
       "source": "/:path*",
-      "destination": "https://readycar-documentos.mdbarcas.chatgpt.site/:path*"
+      "destination": "https://readycar-documentos.mdbarcas.chatgpt.site/:path*",
+      "permanent": false
     }
   ]
 }
