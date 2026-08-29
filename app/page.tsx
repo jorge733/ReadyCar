@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Bell, CarFront, CheckCircle2, ChevronDown, FileCheck2, FileText, Gauge, Menu, MoreHorizontal, Plus, Search, Settings, ShieldCheck, Upload, X } from 'lucide-react';
 
-type Document = { id: number; name: string; type: string; plate: string; vehicle: string; expirationDate: string; fileName?: string | null };
+type Document = { id: number; name: string; type: string; plate: string; vehicle: string; expirationDate: string; fileName?: string | null; file?: Blob | null };
 const demoDocuments: Document[] = [
   { id: 1, name: 'Permiso de circulación', type: 'Permiso', plate: 'LKPD-42', vehicle: 'Mazda CX-5 2022', expirationDate: '2026-09-05', fileName: 'permiso-circulacion.pdf' },
   { id: 2, name: 'Revisión técnica', type: 'Revisión', plate: 'LKPD-42', vehicle: 'Mazda CX-5 2022', expirationDate: '2026-09-18', fileName: 'revision-tecnica.pdf' },
@@ -14,6 +14,41 @@ const dateFormat = new Intl.DateTimeFormat('es-CL', { day: '2-digit', month: 'sh
 function daysUntil(date: string) { const today = new Date(); today.setHours(0, 0, 0, 0); return Math.ceil((new Date(`${date}T12:00:00`).getTime() - today.getTime()) / 86400000); }
 function statusFor(date: string) { const days = daysUntil(date); if (days < 0) return { label: 'Vencido', tone: 'red' }; if (days <= 15) return { label: `Vence en ${days} días`, tone: 'orange' }; if (days <= 45) return { label: `Vence en ${days} días`, tone: 'yellow' }; return { label: 'Vigente', tone: 'green' }; }
 
+const databaseName = 'readycar-documents';
+const storeName = 'documents';
+function openDatabase() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(databaseName, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(storeName, { keyPath: 'id' });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function loadDocuments() {
+  const database = await openDatabase();
+  return new Promise<Document[]>((resolve, reject) => {
+    const request = database.transaction(storeName).objectStore(storeName).getAll();
+    request.onsuccess = () => resolve(request.result as Document[]);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function saveDocument(document: Document) {
+  const database = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(storeName, 'readwrite');
+    transaction.objectStore(storeName).put(document);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+async function downloadDocument(document: Document) {
+  if (!document.file) return;
+  const url = URL.createObjectURL(document.file);
+  const anchor = window.document.createElement('a');
+  anchor.href = url; anchor.download = document.fileName || document.name; anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function Home() {
   const [documents, setDocuments] = useState<Document[]>(demoDocuments);
   const [query, setQuery] = useState('');
@@ -22,16 +57,17 @@ export default function Home() {
   const [mobileNav, setMobileNav] = useState(false);
   const [savedMessage, setSavedMessage] = useState('');
 
-  useEffect(() => { fetch('/api/documents').then((r) => r.ok ? r.json() : Promise.reject()).then((data: Document[]) => data.length && setDocuments(data)).catch(() => undefined); }, []);
+  useEffect(() => { loadDocuments().then(async (data) => { if (data.length) setDocuments(data); else await Promise.all(demoDocuments.map(saveDocument)); }).catch(() => undefined); }, []);
   const filtered = useMemo(() => documents.filter((d) => `${d.name} ${d.type} ${d.vehicle} ${d.plate}`.toLowerCase().includes(query.toLowerCase()) && (filter === 'all' || (filter === 'soon' ? daysUntil(d.expirationDate) <= 45 : daysUntil(d.expirationDate) > 45))), [documents, filter, query]);
   const soon = documents.filter((d) => daysUntil(d.expirationDate) <= 45).length;
   const current = documents.length - soon;
 
   async function addDocument(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const formData = new FormData(event.currentTarget);
-    const optimistic: Document = { id: Date.now(), name: String(formData.get('name')), type: String(formData.get('type')), vehicle: String(formData.get('vehicle')), plate: String(formData.get('plate')).toUpperCase(), expirationDate: String(formData.get('expirationDate')), fileName: (formData.get('file') as File)?.name || null };
+    const selectedFile = formData.get('file') as File;
+    const optimistic: Document = { id: Date.now(), name: String(formData.get('name')), type: String(formData.get('type')), vehicle: String(formData.get('vehicle')), plate: String(formData.get('plate')).toUpperCase(), expirationDate: String(formData.get('expirationDate')), fileName: selectedFile?.name || null, file: selectedFile?.size ? selectedFile : null };
     setDocuments((items) => [optimistic, ...items]); setShowForm(false); setSavedMessage('Documento guardado correctamente'); window.setTimeout(() => setSavedMessage(''), 3500);
-    try { const response = await fetch('/api/documents', { method: 'POST', body: formData }); if (response.ok) { const saved = await response.json() as Document; setDocuments((items) => items.map((item) => item.id === optimistic.id ? saved : item)); } } catch { /* Local preview remains usable. */ }
+    try { await saveDocument(optimistic); } catch { setSavedMessage('No se pudo guardar el documento'); }
   }
 
   return <main className="min-h-screen bg-[#f4f3ef] text-[#17231d]">
@@ -62,6 +98,6 @@ function Stat({ active, onClick, icon, value, title, description, kind }: { acti
   return <button onClick={onClick} className={`rounded-2xl border p-5 text-left transition hover:-translate-y-0.5 ${selected}`}><div className="flex items-start justify-between"><div className={`grid size-10 place-items-center rounded-xl ${dark && active ? 'bg-white/12' : kind === 'orange' ? 'bg-[#fff0e5] text-[#de6531]' : 'bg-[#e8f0ec] text-[#245342]'}`}>{icon}</div><span className={`text-3xl font-bold ${dark && active ? '' : 'text-[#203028]'}`}>{value}</span></div><p className="mt-5 text-sm font-semibold">{title}</p><p className={`mt-1 text-xs ${dark && active ? 'text-white/60' : 'text-[#768179]'}`}>{description}</p></button>;
 }
 
-function DocumentRow({ document }: { document: Document }) { const status = statusFor(document.expirationDate); return <article className="grid gap-4 p-5 transition hover:bg-[#fafaf7] md:grid-cols-[1.5fr_1fr_1fr_auto] md:items-center"><div className="flex min-w-0 items-center gap-4"><div className="grid size-11 shrink-0 place-items-center rounded-xl bg-[#edf1ee] text-[#315b4c]"><FileText size={20} /></div><div className="min-w-0"><p className="truncate text-sm font-bold">{document.name}</p><p className="mt-1 truncate text-xs text-[#7b857e]">{document.fileName || 'Sin archivo adjunto'} · {document.type}</p></div></div><div><p className="text-[10px] font-bold uppercase tracking-[.12em] text-[#909892]">Vehículo</p><p className="mt-1 text-sm font-semibold">{document.plate}</p><p className="text-xs text-[#7c8780]">{document.vehicle}</p></div><div><p className="text-[10px] font-bold uppercase tracking-[.12em] text-[#909892]">Vencimiento</p><p className="mt-1 text-sm font-semibold">{dateFormat.format(new Date(`${document.expirationDate}T12:00:00`))}</p><span className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-bold status-${status.tone}`}>{status.label}</span></div><button className="grid size-9 place-items-center rounded-lg text-[#7a847e] hover:bg-[#eeefeb]" aria-label={`Opciones de ${document.name}`}><MoreHorizontal size={18} /></button></article>; }
+function DocumentRow({ document }: { document: Document }) { const status = statusFor(document.expirationDate); return <article className="grid gap-4 p-5 transition hover:bg-[#fafaf7] md:grid-cols-[1.5fr_1fr_1fr_auto] md:items-center"><div className="flex min-w-0 items-center gap-4"><div className="grid size-11 shrink-0 place-items-center rounded-xl bg-[#edf1ee] text-[#315b4c]"><FileText size={20} /></div><div className="min-w-0"><p className="truncate text-sm font-bold">{document.name}</p><p className="mt-1 truncate text-xs text-[#7b857e]">{document.fileName || 'Sin archivo adjunto'} · {document.type}</p></div></div><div><p className="text-[10px] font-bold uppercase tracking-[.12em] text-[#909892]">Vehículo</p><p className="mt-1 text-sm font-semibold">{document.plate}</p><p className="text-xs text-[#7c8780]">{document.vehicle}</p></div><div><p className="text-[10px] font-bold uppercase tracking-[.12em] text-[#909892]">Vencimiento</p><p className="mt-1 text-sm font-semibold">{dateFormat.format(new Date(`${document.expirationDate}T12:00:00`))}</p><span className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-bold status-${status.tone}`}>{status.label}</span></div><button onClick={() => downloadDocument(document)} disabled={!document.file} title={document.file ? 'Descargar archivo' : 'Sin archivo adjunto'} className="grid size-9 place-items-center rounded-lg text-[#7a847e] hover:bg-[#eeefeb] disabled:cursor-default disabled:opacity-40" aria-label={`Descargar ${document.name}`}><MoreHorizontal size={18} /></button></article>; }
 
 function DocumentForm({ onClose, onSubmit }: { onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) { return <div className="fixed inset-0 z-50 grid place-items-center bg-[#10241c]/55 p-4 backdrop-blur-sm" onMouseDown={(e) => e.target === e.currentTarget && onClose()}><form onSubmit={onSubmit} className="w-full max-w-lg rounded-3xl bg-[#fbfbf8] p-6 shadow-2xl sm:p-8"><div className="flex items-start justify-between"><div><p className="text-xs font-bold uppercase tracking-[.14em] text-[#78847c]">Nuevo registro</p><h2 className="mt-2 text-2xl font-bold tracking-tight">Agregar documento</h2></div><button type="button" aria-label="Cerrar" onClick={onClose} className="rounded-xl p-2 hover:bg-black/5"><X size={20} /></button></div><div className="mt-6 grid gap-4 sm:grid-cols-2"><label className="field sm:col-span-2">Nombre del documento<input name="name" required placeholder="Ej. Permiso de circulación" /></label><label className="field">Tipo<select name="type" defaultValue="Permiso"><option>Permiso</option><option>Revisión</option><option>Seguro</option><option>Registro</option><option>Otro</option></select></label><label className="field">Fecha de vencimiento<input name="expirationDate" type="date" required /></label><label className="field">Vehículo<input name="vehicle" required defaultValue="Mazda CX-5 2022" /></label><label className="field">Patente<input name="plate" required defaultValue="LKPD-42" /></label><label className="field sm:col-span-2"><span>Archivo <em>(opcional, máx. 10 MB)</em></span><span className="flex h-24 cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[#bcc5bf] bg-white text-sm font-semibold text-[#557066]"><Upload size={18} />Subir PDF o imagen</span><input className="sr-only" name="file" type="file" accept="application/pdf,image/*" /></label></div><div className="mt-7 flex justify-end gap-3"><button type="button" onClick={onClose} className="rounded-xl px-5 py-3 text-sm font-semibold hover:bg-black/5">Cancelar</button><button className="rounded-xl bg-[#183f33] px-5 py-3 text-sm font-bold text-white">Guardar documento</button></div></form></div>; }
