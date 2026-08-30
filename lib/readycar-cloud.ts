@@ -133,11 +133,11 @@ export async function deleteCloudDocument(
   );
 }
 
-export async function downloadCloudDocument(
+export async function getCloudDocumentBlob(
   userId: string,
   document: CloudDocument,
 ) {
-  if (!firestore || !document.chunkCount) return;
+  if (!firestore || !document.chunkCount) return null;
   const chunks = await getDocs(
     query(
       collection(
@@ -158,9 +158,17 @@ export async function downloadCloudDocument(
       value.byteOffset + value.byteLength,
     ) as ArrayBuffer;
   });
-  const blob = new Blob(parts, {
+  return new Blob(parts, {
     type: document.fileType || 'application/octet-stream',
   });
+}
+
+export async function downloadCloudDocument(
+  userId: string,
+  document: CloudDocument,
+) {
+  const blob = await getCloudDocumentBlob(userId, document);
+  if (!blob) return;
   const url = URL.createObjectURL(blob);
   const anchor = window.document.createElement('a');
   anchor.href = url;

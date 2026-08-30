@@ -1,9 +1,17 @@
 'use client';
 
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
+import {
+  FormEvent,
+  ReactNode,
+  useEffect,
+  useId,
+  useMemo,
+  useState,
+} from 'react';
 import {
   AlertTriangle,
   Bell,
+  Bike,
   CalendarClock,
   CarFront,
   CheckCircle2,
@@ -41,6 +49,7 @@ import { auth, firebaseReady } from '@/lib/firebase';
 import {
   deleteCloudDocument,
   downloadCloudDocument,
+  getCloudDocumentBlob,
   saveCloudDocument,
   watchDocuments,
   type CloudDocument,
@@ -55,6 +64,7 @@ type Vehicle = {
   model: string;
   year: string;
   plate: string;
+  vehicleType?: 'car' | 'motorcycle';
 };
 type VehicleDocument = CloudDocument;
 
@@ -111,6 +121,8 @@ export default function Home() {
   const [showVehicleForm, setShowVehicleForm] = useState(false);
   const [showDocumentForm, setShowDocumentForm] = useState(false);
   const [editingDocument, setEditingDocument] =
+    useState<VehicleDocument | null>(null);
+  const [previewDocument, setPreviewDocument] =
     useState<VehicleDocument | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const [toast, setToast] = useState('');
@@ -246,6 +258,8 @@ export default function Home() {
       model: String(data.get('model')),
       year: String(data.get('year')),
       plate: String(data.get('plate')).toUpperCase(),
+      vehicleType:
+        data.get('vehicleType') === 'motorcycle' ? 'motorcycle' : 'car',
     };
     setProfile(nextProfile);
     localStorage.setItem(profileKey, JSON.stringify(nextProfile));
@@ -263,6 +277,8 @@ export default function Home() {
       model: String(data.get('model')),
       year: String(data.get('year')),
       plate: String(data.get('plate')).toUpperCase(),
+      vehicleType:
+        data.get('vehicleType') === 'motorcycle' ? 'motorcycle' : 'car',
     };
     saveVehicles([...vehicles, vehicle]);
     setShowVehicleForm(false);
@@ -495,7 +511,8 @@ export default function Home() {
             </div>
             <p className="text-sm font-bold">Documentos privados</p>
             <p className="mt-1 text-xs leading-5 text-[#68756e]">
-              Tus archivos se sincronizan con tu cuenta y solo tú puedes abrirlos.
+              Tus archivos se sincronizan con tu cuenta y solo tú puedes
+              abrirlos.
             </p>
           </div>
           <button
@@ -548,6 +565,7 @@ export default function Home() {
                 onDownload={(document) =>
                   user && downloadCloudDocument(user.uid, document)
                 }
+                onPreview={setPreviewDocument}
                 onDelete={deleteDocument}
               />
             )}
@@ -595,6 +613,14 @@ export default function Home() {
             setEditingDocument(null);
           }}
           onSubmit={saveDocument}
+        />
+      )}
+      {previewDocument && user && (
+        <DocumentPreview
+          userId={user.uid}
+          document={previewDocument}
+          onClose={() => setPreviewDocument(null)}
+          onDownload={() => downloadCloudDocument(user.uid, previewDocument)}
         />
       )}
       {!authLoading && showAuth && (
@@ -881,6 +907,7 @@ function DocumentsView({
   onAdd,
   onEdit,
   onDownload,
+  onPreview,
   onDelete,
 }: {
   documents: VehicleDocument[];
@@ -893,6 +920,7 @@ function DocumentsView({
   onAdd: () => void;
   onEdit: (document: VehicleDocument) => void;
   onDownload: (document: VehicleDocument) => void;
+  onPreview: (document: VehicleDocument) => void;
   onDelete: (document: VehicleDocument) => void;
 }) {
   return (
@@ -946,6 +974,7 @@ function DocumentsView({
                 alertDays={alertDays}
                 onEdit={() => onEdit(document)}
                 onDownload={() => onDownload(document)}
+                onPreview={() => onPreview(document)}
                 onDelete={() => onDelete(document)}
               />
             ))}
@@ -969,6 +998,7 @@ function DocumentRow({
   alertDays,
   onEdit,
   onDownload,
+  onPreview,
   onDelete,
 }: {
   document: VehicleDocument;
@@ -976,6 +1006,7 @@ function DocumentRow({
   alertDays: number[];
   onEdit: () => void;
   onDownload: () => void;
+  onPreview: () => void;
   onDelete: () => void;
 }) {
   const status = statusFor(document.expirationDate, alertDays);
@@ -1014,6 +1045,14 @@ function DocumentRow({
       </div>
       <div className="flex gap-1">
         <button
+          onClick={onPreview}
+          disabled={!document.chunkCount}
+          className="row-action"
+          title="Ver documento"
+        >
+          <Eye size={16} />
+        </button>
+        <button
           onClick={onDownload}
           disabled={!document.chunkCount}
           className="row-action"
@@ -1033,6 +1072,108 @@ function DocumentRow({
         </button>
       </div>
     </article>
+  );
+}
+
+function DocumentPreview({
+  userId,
+  document,
+  onClose,
+  onDownload,
+}: {
+  userId: string;
+  document: VehicleDocument;
+  onClose: () => void;
+  onDownload: () => void;
+}) {
+  const [url, setUrl] = useState('');
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let objectUrl = '';
+    getCloudDocumentBlob(userId, document)
+      .then((blob) => {
+        if (!blob) throw new Error('Archivo no disponible');
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      })
+      .catch(() => setFailed(true));
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [userId, document]);
+
+  const isImage = document.fileType?.startsWith('image/');
+  const isPdf =
+    document.fileType === 'application/pdf' ||
+    document.fileName?.toLowerCase().endsWith('.pdf');
+  return (
+    <Modal onClose={onClose}>
+      <section className="flex h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-3xl bg-[#fbfbf8] shadow-2xl">
+        <header className="flex items-center justify-between gap-4 border-b border-[#e1e4df] px-5 py-4 sm:px-7">
+          <div className="min-w-0">
+            <p className="truncate font-bold">{document.name}</p>
+            <p className="mt-1 truncate text-xs text-[#748078]">
+              {document.fileName}
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={onDownload}
+              className="flex items-center gap-2 rounded-xl bg-[#183f33] px-4 py-2 text-xs font-bold text-white"
+            >
+              <Download size={15} />
+              Descargar
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded-xl border border-[#d8ddd8] p-2"
+              aria-label="Cerrar visor"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </header>
+        <div className="grid min-h-0 flex-1 place-items-center bg-[#e9ebe7] p-3 sm:p-6">
+          {!url && !failed && (
+            <div className="text-sm font-semibold text-[#68756e]">
+              Cargando documento…
+            </div>
+          )}
+          {failed && (
+            <Empty
+              icon={<FileText />}
+              title="No pudimos abrir este archivo"
+              text="Puedes intentar descargarlo para verlo en tu dispositivo."
+              action="Descargar"
+              onAction={onDownload}
+            />
+          )}
+          {url && isImage && (
+            <img
+              src={url}
+              alt={document.name}
+              className="max-h-full max-w-full rounded-xl object-contain shadow-lg"
+            />
+          )}
+          {url && isPdf && (
+            <iframe
+              src={url}
+              title={document.name}
+              className="h-full w-full rounded-xl bg-white shadow-lg"
+            />
+          )}
+          {url && !isImage && !isPdf && (
+            <Empty
+              icon={<FileText />}
+              title="Vista previa no disponible"
+              text="Este tipo de archivo se puede descargar de forma segura."
+              action="Descargar"
+              onAction={onDownload}
+            />
+          )}
+        </div>
+      </section>
+    </Modal>
   );
 }
 
@@ -1066,7 +1207,11 @@ function VehiclesView({
             >
               <div className="flex items-start justify-between">
                 <div className="grid size-12 place-items-center rounded-xl bg-[#183f33] text-white">
-                  <CarFront />
+                  {vehicle.vehicleType === 'motorcycle' ? (
+                    <Bike />
+                  ) : (
+                    <CarFront />
+                  )}
                 </div>
                 <span className="rounded-lg bg-[#f0f1ed] px-2 py-1 text-[10px] font-bold text-[#657168]">
                   {vehicle.year}
@@ -1551,6 +1696,147 @@ function AuthModal({
     </Modal>
   );
 }
+type CatalogMake = { MakeId: number; MakeName: string };
+type CatalogModel = { Model_ID: number; Model_Name: string };
+
+function VehicleCatalogFields({
+  initialType = 'car',
+  initialBrand = '',
+  initialModel = '',
+}: {
+  initialType?: 'car' | 'motorcycle';
+  initialBrand?: string;
+  initialModel?: string;
+}) {
+  const listId = useId().replace(/:/g, '');
+  const [vehicleType, setVehicleType] = useState<'car' | 'motorcycle'>(
+    initialType,
+  );
+  const [brand, setBrand] = useState(initialBrand);
+  const [model, setModel] = useState(initialModel);
+  const [makes, setMakes] = useState<CatalogMake[]>([]);
+  const [models, setModels] = useState<CatalogModel[]>([]);
+  const [loadingMakes, setLoadingMakes] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoadingMakes(true);
+    setMakes([]);
+    setModels([]);
+    fetch(`/api/vehicles/makes?type=${vehicleType}`, {
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Catálogo no disponible');
+        return (await response.json()) as { makes: CatalogMake[] };
+      })
+      .then((data) => setMakes(data.makes || []))
+      .catch(() => undefined)
+      .finally(() => setLoadingMakes(false));
+    return () => controller.abort();
+  }, [vehicleType]);
+
+  useEffect(() => {
+    const selected = makes.find(
+      (item) =>
+        item.MakeName.localeCompare(brand, undefined, {
+          sensitivity: 'base',
+        }) === 0,
+    );
+    if (!selected) {
+      setModels([]);
+      return;
+    }
+    const controller = new AbortController();
+    setLoadingModels(true);
+    fetch(
+      `/api/vehicles/models?type=${vehicleType}&make=${encodeURIComponent(selected.MakeName)}`,
+      { signal: controller.signal },
+    )
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Catálogo no disponible');
+        return (await response.json()) as { models: CatalogModel[] };
+      })
+      .then((data) => setModels(data.models || []))
+      .catch(() => setModels([]))
+      .finally(() => setLoadingModels(false));
+    return () => controller.abort();
+  }, [brand, makes, vehicleType]);
+
+  return (
+    <>
+      <label className="field sm:col-span-2">
+        Tipo de vehículo
+        <select
+          name="vehicleType"
+          value={vehicleType}
+          onChange={(event) => {
+            setVehicleType(event.target.value as 'car' | 'motorcycle');
+            setBrand('');
+            setModel('');
+          }}
+        >
+          <option value="car">Auto</option>
+          <option value="motorcycle">Moto</option>
+        </select>
+      </label>
+      <label className="field">
+        Marca
+        <input
+          name="brand"
+          required
+          value={brand}
+          onChange={(event) => {
+            setBrand(event.target.value);
+            setModel('');
+          }}
+          list={`${listId}-makes`}
+          placeholder={
+            loadingMakes ? 'Cargando marcas…' : 'Busca cualquier marca'
+          }
+          autoComplete="off"
+        />
+        <datalist id={`${listId}-makes`}>
+          {makes.map((make) => (
+            <option key={make.MakeId} value={make.MakeName} />
+          ))}
+        </datalist>
+      </label>
+      <label className="field">
+        Modelo
+        <input
+          name="model"
+          required
+          value={model}
+          onChange={(event) => setModel(event.target.value)}
+          list={`${listId}-models`}
+          placeholder={
+            loadingModels
+              ? 'Cargando modelos…'
+              : brand
+                ? 'Busca el modelo'
+                : 'Primero elige una marca'
+          }
+          autoComplete="off"
+        />
+        <datalist id={`${listId}-models`}>
+          {models.map((item) => (
+            <option
+              key={`${item.Model_ID}-${item.Model_Name}`}
+              value={item.Model_Name}
+            />
+          ))}
+        </datalist>
+      </label>
+      <p className="-mt-2 text-[10px] leading-4 text-[#7a857e] sm:col-span-2">
+        Catálogo internacional de autos y motos; también puedes escribir una
+        marca o modelo que aún no figure.
+      </p>
+    </>
+  );
+}
+
 function OnboardingForm({
   profile,
   firstVehicle,
@@ -1612,24 +1898,11 @@ function OnboardingForm({
               placeholder="ABCD-12"
             />
           </label>
-          <label className="field">
-            Marca
-            <input
-              name="brand"
-              required
-              defaultValue={firstVehicle?.brand}
-              placeholder="Ej. Toyota"
-            />
-          </label>
-          <label className="field">
-            Modelo
-            <input
-              name="model"
-              required
-              defaultValue={firstVehicle?.model}
-              placeholder="Ej. Corolla Cross"
-            />
-          </label>
+          <VehicleCatalogFields
+            initialType={firstVehicle?.vehicleType}
+            initialBrand={firstVehicle?.brand}
+            initialModel={firstVehicle?.model}
+          />
           <label className="field sm:col-span-2">
             Año
             <input
@@ -1676,14 +1949,7 @@ function VehicleForm({
             Patente
             <input name="plate" required placeholder="ABCD-12" />
           </label>
-          <label className="field">
-            Marca
-            <input name="brand" required placeholder="Ej. Hyundai" />
-          </label>
-          <label className="field">
-            Modelo
-            <input name="model" required placeholder="Ej. Tucson" />
-          </label>
+          <VehicleCatalogFields />
           <label className="field sm:col-span-2">
             Año
             <input
