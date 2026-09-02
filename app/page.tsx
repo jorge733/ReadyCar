@@ -1863,7 +1863,7 @@ function Modal({
     >
       <DialogContent
         showCloseButton={false}
-        className="w-auto max-w-[calc(100%-2rem)]! max-h-[95dvh] overflow-y-auto border-0 bg-transparent p-0 shadow-none ring-0 sm:max-w-5xl!"
+        className="w-full max-w-[calc(100%-2rem)]! max-h-[95dvh] justify-items-center overflow-y-auto border-0 bg-transparent p-0 shadow-none ring-0 sm:max-w-5xl!"
       >
         <DialogTitle className="sr-only">ReadyCar</DialogTitle>
         {children}
