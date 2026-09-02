@@ -59,6 +59,7 @@ import {
 } from '@/lib/readycar-cloud';
 
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { compareExpiration, fileError, searchText } from '@/lib/document-input';
 import { AccountTools } from '@/components/account-tools';
 import { daysUntil, formatExpiry } from '@/lib/expiry';
 import { watchAccount, changeAccount, type Vehicle } from '@/lib/account-cloud';
@@ -101,6 +102,11 @@ function vapidKey(value: string) {
 export default function Home() {
   const [accountReady, setAccountReady] = useState(false);
   const [editingVehicle, setEditingVehicle] = useState<Vehicle | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [newDocumentVehicle, setNewDocumentVehicle] = useState<
+    number | undefined
+  >();
+  const [sortOrder, setSortOrder] = useState('expiry');
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [statusFilter, setStatusFilter] = useState('all');
@@ -199,8 +205,9 @@ export default function Home() {
           const vehicle = vehicles.find(
             (item) => item.id === document.vehicleId,
           );
-          const text =
-            `${document.name} ${document.type} ${vehicle?.plate || ''} ${vehicle?.brand || ''}`.toLowerCase();
+          const text = searchText(
+            `${document.name} ${document.type} ${document.notes || ''} ${vehicle?.plate || ''} ${vehicle?.brand || ''} ${vehicle?.model || ''} ${vehicle?.nickname || ''}`,
+          );
           return (
             (statusFilter === 'history'
               ? Boolean(document.archived)
@@ -213,12 +220,26 @@ export default function Home() {
                   ? daysUntil(document.expirationDate) >= 0 &&
                     daysUntil(document.expirationDate) <= Math.max(...alertDays)
                   : daysUntil(document.expirationDate) >= 0)) &&
-            text.includes(query.toLowerCase()) &&
+            text.includes(searchText(query)) &&
             (vehicleFilter === 'all' || document.vehicleId === vehicleFilter)
           );
         })
-        .sort((a, b) => a.expirationDate.localeCompare(b.expirationDate)),
-    [allDocuments, query, vehicleFilter, vehicles, statusFilter, alertDays],
+        .sort((a, b) =>
+          sortOrder === 'name'
+            ? a.name.localeCompare(b.name, 'es')
+            : sortOrder === 'recent'
+              ? b.id - a.id
+              : compareExpiration(a.expirationDate, b.expirationDate),
+        ),
+    [
+      allDocuments,
+      query,
+      vehicleFilter,
+      vehicles,
+      statusFilter,
+      alertDays,
+      sortOrder,
+    ],
   );
   const expiring = documents.filter(
     (document) =>
@@ -322,7 +343,10 @@ export default function Home() {
       setSaving(false);
     }
   }
-  async function saveDocument(event: SubmitEvent<HTMLFormElement>) {
+  async function saveDocument(
+    event: SubmitEvent<HTMLFormElement>,
+    pickedFile?: File | null,
+  ) {
     event.preventDefault();
     if (savingRef.current) return;
     if (!user) {
@@ -331,7 +355,8 @@ export default function Home() {
     }
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const selectedFile = data.get('file') as File;
+    const formFile = data.get('file') as File | null;
+    const selectedFile = pickedFile || (formFile?.size ? formFile : null);
     const document: VehicleDocument = {
       id: editingDocument?.id || Date.now(),
       name: fieldText(data, 'name'),
@@ -352,8 +377,10 @@ export default function Home() {
     savingRef.current = true;
     setSaving(true);
     try {
-      await saveCloudDocument(user, document, selectedFile);
+      setUploadProgress(0);
+      await saveCloudDocument(user, document, selectedFile, setUploadProgress);
       setShowDocumentForm(false);
+      setNewDocumentVehicle(undefined);
       setEditingDocument(null);
       notify(
         editingDocument
@@ -528,12 +555,13 @@ export default function Home() {
           {user ? (
             <button
               onClick={() => setShowAuth(true)}
-              className="ml-1 hidden items-center gap-3 rounded-xl border border-[#d9ddd7] bg-white px-3 py-2 sm:flex"
+              aria-label="Mi cuenta y cerrar sesión"
+              className="ml-1 flex items-center gap-2 rounded-xl border border-[#d9ddd7] bg-white px-2 py-2 sm:gap-3 sm:px-3"
             >
               <div className="grid size-8 place-items-center rounded-lg bg-[#e2eee8] text-xs font-bold text-[#174434]">
                 {initials}
               </div>
-              <div className="text-left">
+              <div className="hidden text-left sm:block">
                 <p className="max-w-32 truncate text-xs font-semibold">
                   {profile?.name || user.displayName || 'Tu perfil'}
                 </p>
@@ -639,7 +667,7 @@ export default function Home() {
                 expiring={expiring}
                 overdue={overdue}
                 onAddDocument={() =>
-                  vehicles.length
+                  vehicles.some((vehicle) => !vehicle.archived)
                     ? setShowDocumentForm(true)
                     : setShowVehicleForm(true)
                 }
@@ -761,6 +789,14 @@ export default function Home() {
             )}
             {view === 'documents' && (
               <DocumentsView
+                sortOrder={sortOrder}
+                onSort={setSortOrder}
+                onReset={() => {
+                  setQuery('');
+                  setVehicleFilter('all');
+                  setStatusFilter('all');
+                  setSortOrder('expiry');
+                }}
                 documents={filteredDocuments}
                 vehicles={vehicles}
                 query={query}
@@ -804,6 +840,17 @@ export default function Home() {
                 vehicles={vehicles}
                 documents={documents}
                 alertDays={alertDays}
+                onDocuments={(vehicle) => {
+                  setVehicleFilter(vehicle.id);
+                  setStatusFilter('all');
+                  setQuery('');
+                  setView('documents');
+                }}
+                onAddDocument={(vehicle) => {
+                  setEditingDocument(null);
+                  setNewDocumentVehicle(vehicle.id);
+                  setShowDocumentForm(true);
+                }}
                 onAdd={() => {
                   setEditingVehicle(null);
                   setShowVehicleForm(true);
@@ -928,9 +975,13 @@ export default function Home() {
       {showDocumentForm && (
         <DocumentForm
           vehicles={vehicles}
+          busy={saving}
+          progress={uploadProgress}
+          initialVehicleId={newDocumentVehicle}
           document={editingDocument}
           onClose={() => {
             setShowDocumentForm(false);
+            setNewDocumentVehicle(undefined);
             setEditingDocument(null);
           }}
           onSubmit={saveDocument}
@@ -1226,6 +1277,9 @@ function Stat({
 }
 
 function DocumentsView({
+  sortOrder,
+  onSort,
+  onReset,
   documents,
   vehicles,
   query,
@@ -1240,6 +1294,9 @@ function DocumentsView({
   onRenew,
   onDelete,
 }: {
+  sortOrder: string;
+  onSort: (value: string) => void;
+  onReset: () => void;
   documents: VehicleDocument[];
   vehicles: Vehicle[];
   query: string;
@@ -1271,7 +1328,7 @@ function DocumentsView({
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               className="w-full bg-transparent text-sm outline-none"
-              placeholder="Buscar por documento, patente o marca"
+              placeholder="Buscar documento, vehículo o notas"
             />
           </label>
           <select
@@ -1292,6 +1349,22 @@ function DocumentsView({
               </option>
             ))}
           </select>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4 text-xs text-[#68756e]">
+          <span>{documents.length} documento(s)</span>
+          <select
+            aria-label="Orden de documentos"
+            className="rounded-xl border p-2"
+            value={sortOrder}
+            onChange={(event) => onSort(event.target.value)}
+          >
+            <option value="expiry">Vencimiento más próximo</option>
+            <option value="name">Nombre A–Z</option>
+            <option value="recent">Agregados recientemente</option>
+          </select>
+          <button onClick={onReset} className="underline">
+            Limpiar filtros
+          </button>
         </div>
         {documents.length ? (
           <div className="divide-y divide-[#ecece8]">
@@ -1496,9 +1569,10 @@ function DocumentPreview({
               onAction={onDownload}
             />
           )}
-          {url && isImage && (
+          {url && isImage && !failed && (
             <img
               src={url}
+              onError={() => setFailed(true)}
               alt={document.name}
               className="max-h-full max-w-full rounded-xl object-contain shadow-lg"
             />
@@ -1526,6 +1600,8 @@ function DocumentPreview({
 }
 
 function VehiclesView({
+  onDocuments,
+  onAddDocument,
   vehicles,
   documents,
   alertDays,
@@ -1538,6 +1614,8 @@ function VehiclesView({
   documents: VehicleDocument[];
   alertDays: number[];
   onAdd: () => void;
+  onDocuments: (vehicle: Vehicle) => void;
+  onAddDocument: (vehicle: Vehicle) => void;
   onEdit: (vehicle: Vehicle) => void;
   onArchive: (vehicle: Vehicle) => void;
   onDelete: (vehicle: Vehicle) => void;
@@ -1572,6 +1650,22 @@ function VehiclesView({
                 <span className="rounded-lg bg-[#f0f1ed] px-2 py-1 text-[10px] font-bold text-[#657168]">
                   {vehicle.year}
                 </span>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  className="rounded-xl bg-[#183f33] px-3 py-3 text-xs font-bold text-white"
+                  onClick={() => onDocuments(vehicle)}
+                >
+                  Ver documentos
+                </button>
+                {!vehicle.archived && (
+                  <button
+                    className="rounded-xl border px-3 py-3 text-xs font-bold"
+                    onClick={() => onAddDocument(vehicle)}
+                  >
+                    Agregar documento
+                  </button>
+                )}
               </div>
               <div className="mt-4 flex flex-wrap gap-3 text-xs">
                 <button onClick={() => onEdit(vehicle)}>Editar</button>
@@ -2470,20 +2564,49 @@ function VehicleForm({
   );
 }
 function DocumentForm({
+  busy,
+  progress,
+  initialVehicleId,
   vehicles,
   document,
   onClose,
   onSubmit,
 }: {
+  busy: boolean;
+  progress: number;
+  initialVehicleId?: number;
   vehicles: Vehicle[];
   document: VehicleDocument | null;
   onClose: () => void;
-  onSubmit: (event: SubmitEvent<HTMLFormElement>) => void;
+  onSubmit: (event: SubmitEvent<HTMLFormElement>, file?: File | null) => void;
 }) {
+  const [pickedFile, setPickedFile] = useState<File | null>(null);
+  const [error, setError] = useState('');
+  const camera = useRef<HTMLInputElement>(null);
+  const close = () => {
+    if (!busy) onClose();
+  };
+  function choose(file?: File) {
+    if (!file) return;
+    const message = fileError(file);
+    if (message) {
+      setError(message);
+      return;
+    }
+    setPickedFile(file);
+    setError('');
+  }
   return (
-    <Modal onClose={onClose}>
+    <Modal locked={busy} onClose={close}>
       <form
-        onSubmit={onSubmit}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!pickedFile && !document?.fileName) {
+            setError('Selecciona un archivo o toma una foto para continuar.');
+            return;
+          }
+          if (!busy && !error) onSubmit(event, pickedFile);
+        }}
         className="w-full max-w-lg rounded-3xl bg-[#fbfbf8] p-6 shadow-2xl sm:p-8"
       >
         <FormTitle
@@ -2495,9 +2618,9 @@ function DocumentForm({
                 ? 'Editar documento'
                 : 'Agregar documento'
           }
-          onClose={onClose}
+          onClose={close}
         />
-        <div className="mt-6 grid gap-4 sm:grid-cols-2">
+        <fieldset disabled={busy} className="mt-6 grid gap-4 sm:grid-cols-2">
           <label className="field sm:col-span-2">
             Nombre
             <input
@@ -2534,14 +2657,23 @@ function DocumentForm({
             Vehículo
             <select
               name="vehicleId"
-              defaultValue={document?.vehicleId || vehicles[0]?.id}
+              defaultValue={
+                document?.vehicleId ||
+                initialVehicleId ||
+                vehicles.find((vehicle) => !vehicle.archived)?.id
+              }
             >
-              {vehicles.map((vehicle) => (
-                <option key={vehicle.id} value={vehicle.id}>
-                  {vehicle.plate} · {vehicle.nickname} ({vehicle.brand}{' '}
-                  {vehicle.model})
-                </option>
-              ))}
+              {vehicles
+                .filter(
+                  (vehicle) =>
+                    !vehicle.archived || vehicle.id === document?.vehicleId,
+                )
+                .map((vehicle) => (
+                  <option key={vehicle.id} value={vehicle.id}>
+                    {vehicle.plate} · {vehicle.nickname} ({vehicle.brand}{' '}
+                    {vehicle.model})
+                  </option>
+                ))}
             </select>
           </label>
           <label className="field sm:col-span-2">
@@ -2557,21 +2689,66 @@ function DocumentForm({
             <span>
               Archivo <em>(PDF o imagen, hasta 10 MB)</em>
             </span>
-            <span className="flex h-24 cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[#bcc5bf] bg-white text-sm font-semibold text-[#557066]">
+            <span className="flex min-h-24 cursor-pointer items-center justify-center gap-2 break-all rounded-xl border border-dashed border-[#bcc5bf] bg-white px-4 py-3 text-center text-sm font-semibold text-[#557066]">
               <Upload size={18} />
-              {document?.fileName || 'Seleccionar archivo'}
+              {pickedFile
+                ? `${pickedFile.name} · ${(pickedFile.size / 1024 / 1024).toFixed(2)} MB`
+                : document?.fileName || 'Seleccionar archivo'}
             </span>
             <input
               className="sr-only"
               name="file"
               type="file"
-              accept="application/pdf,image/*"
-              required={!document?.fileName}
+              accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif"
+              onChange={(event) => {
+                choose(event.target.files?.[0]);
+                event.target.value = '';
+              }}
+              required={false}
             />
           </label>
-        </div>
+          <button
+            type="button"
+            className="rounded-xl border px-4 py-3 text-sm font-semibold sm:col-span-2"
+            onClick={() => camera.current?.click()}
+          >
+            Tomar foto del documento
+          </button>
+          <input
+            ref={camera}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="sr-only"
+            aria-label="Fotografiar documento"
+            onChange={(event) => {
+              choose(event.target.files?.[0]);
+              event.target.value = '';
+            }}
+          />
+          {error && (
+            <p role="alert" className="text-sm text-red-700 sm:col-span-2">
+              {error}
+            </p>
+          )}
+        </fieldset>
+        {busy && (
+          <div role="status" className="mt-4 text-sm">
+            <p>
+              {progress < 95 ? 'Subiendo archivo' : 'Guardando documento'} ·{' '}
+              {progress}%
+            </p>
+            <progress
+              aria-label="Progreso de carga"
+              value={progress}
+              max={100}
+              className="mt-2 w-full"
+            />
+          </div>
+        )}
         <FormActions
           onClose={onClose}
+          busy={busy}
           label={document ? 'Guardar cambios' : 'Guardar documento'}
         />
       </form>
@@ -2607,23 +2784,29 @@ function FormTitle({
   );
 }
 function FormActions({
+  busy = false,
   onClose,
   label,
 }: {
   onClose: () => void;
   label: string;
+  busy?: boolean;
 }) {
   return (
     <div className="mt-7 flex justify-end gap-3">
       <button
+        disabled={busy}
         type="button"
         onClick={onClose}
         className="rounded-xl px-5 py-3 text-sm font-semibold hover:bg-black/5"
       >
         Cancelar
       </button>
-      <button className="rounded-xl bg-[#183f33] px-5 py-3 text-sm font-bold text-white">
-        {label}
+      <button
+        disabled={busy}
+        className="rounded-xl bg-[#183f33] px-5 py-3 text-sm font-bold text-white"
+      >
+        {busy ? 'Guardando…' : label}
       </button>
     </div>
   );

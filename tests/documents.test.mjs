@@ -50,6 +50,12 @@ globalThis.__readycarMock = {
     };
   },
 };
+const inputCode = ts.transpileModule(
+  readFileSync(new URL('../lib/document-input.ts', import.meta.url), 'utf8'),
+  { compilerOptions: { module: ts.ModuleKind.ESNext } },
+).outputText;
+const inputUrl =
+  'data:text/javascript;base64,' + Buffer.from(inputCode).toString('base64');
 const source = readFileSync(
   new URL('../lib/readycar-cloud.ts', import.meta.url),
   'utf8',
@@ -68,7 +74,8 @@ const compiled = ts
   .replace(
     /import\s*\{ firestore \}\s*from '.\/firebase';/,
     'const firestore = {};',
-  );
+  )
+  .replace("'./document-input'", JSON.stringify(inputUrl));
 const { saveCloudDocument, getCloudDocumentBlob } = await import(
   'data:text/javascript;base64,' + Buffer.from(compiled).toString('base64')
 );
@@ -151,4 +158,51 @@ test('oversized and unsupported files are rejected before changing the document'
     ),
   );
   assert.equal(records.has('users/test-user/documents/1'), false);
+});
+
+test('progress reaches 100 only after the document is committed', async () => {
+  records.clear();
+  commits = 0;
+  failAt = Infinity;
+  const progress = [];
+  await saveCloudDocument(
+    user,
+    document,
+    new File([new Uint8Array(4 * 1024 * 1024)], 'scan.pdf', {
+      type: 'application/pdf',
+    }),
+    (value) => {
+      progress.push(value);
+      if (value === 100)
+        assert.equal(
+          records.get('users/test-user/documents/1').fileName,
+          'scan.pdf',
+        );
+    },
+  );
+  assert.equal(progress[0], 0);
+  assert.equal(progress.at(-1), 100);
+  assert.ok(progress.some((value) => value > 0 && value < 95));
+});
+test('invalid calendar date and zero-byte file are rejected without writes', async () => {
+  records.clear();
+  commits = 0;
+  failAt = Infinity;
+  await assert.rejects(
+    saveCloudDocument(
+      user,
+      { ...document, expirationDate: '2026-02-30' },
+      new File(['scan'], 'scan.pdf', { type: 'application/pdf' }),
+    ),
+    /Fecha/,
+  );
+  await assert.rejects(
+    saveCloudDocument(
+      user,
+      document,
+      new File([], 'empty.pdf', { type: 'application/pdf' }),
+    ),
+    /vacío/,
+  );
+  assert.equal(commits, 0);
 });

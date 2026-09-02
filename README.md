@@ -8,6 +8,8 @@ Gestión personal de vehículos, documentos y vencimientos. Sitio: https://appre
 - Perfil, garaje y preferencias sincronizados por cuenta. Recuperación explícita del garaje guardado por versiones anteriores en el navegador.
 - Alta, edición, archivo, restauración y eliminación de vehículos sin documentos. Control de patentes duplicadas.
 - PDF e imágenes de hasta 10 MB, visor, descarga, edición y renovación conservando el documento anterior.
+- Carga desde cámara o archivos con nombre, tamaño y progreso. Acceso a cuenta y cierre de sesión desde móvil.
+- Acciones directas por vehículo, búsqueda sin distinción de tildes en documentos y notas, y orden por vencimiento, nombre o registro reciente.
 - Vencimiento opcional, notas, búsqueda, filtros por vehículo y estado e historial de renovaciones.
 - Alertas calculadas con fecha de Chile, preferencias de anticipación y avisos diarios del navegador.
 - Exportación de respaldo JSON con archivos, importación como copias y exportación de calendario ICS.

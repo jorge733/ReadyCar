@@ -10,6 +10,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { firestore } from './firebase';
+import { fileError, validExpiration } from './document-input';
 
 export type CloudDocument = {
   id: number;
@@ -46,14 +47,16 @@ export async function saveCloudDocument(
   user: User,
   document: CloudDocument,
   file?: File | null,
+  onProgress?: (percent: number) => void,
 ) {
   if (!firestore) throw new Error('Firebase no está disponible');
-  if (
-    document.expirationDate &&
-    (!/^\d{4}-\d{2}-\d{2}$/.test(document.expirationDate) ||
-      !Number.isFinite(Date.parse(document.expirationDate)))
-  )
+  if (!validExpiration(document.expirationDate))
     throw new Error('Fecha de vencimiento inválida');
+  if (file) {
+    const error = fileError(file);
+    if (error) throw new Error(error);
+  }
+  onProgress?.(0);
   if (!document.name.trim() || !Number.isFinite(document.vehicleId))
     throw new Error('Revisa el nombre y el vehículo');
   const batch = writeBatch(firestore);
@@ -76,17 +79,6 @@ export async function saveCloudDocument(
         'chunks',
       ),
     );
-    if (
-      file.type !== 'application/pdf' &&
-      ![
-        'image/jpeg',
-        'image/png',
-        'image/webp',
-        'image/heic',
-        'image/heif',
-      ].includes(file.type)
-    )
-      throw new Error('Usa un PDF o imagen JPG, PNG, WEBP o HEIC');
     const bytes = new Uint8Array(await file.arrayBuffer());
     const chunkSize = 700 * 1024;
     chunkCount = Math.ceil(bytes.length / chunkSize);
@@ -111,6 +103,7 @@ export async function saveCloudDocument(
       );
       if ((index + 1) % 4 === 0 || index === chunkCount - 1) {
         await upload.commit();
+        onProgress?.(Math.round(((index + 1) / chunkCount) * 95));
         upload = writeBatch(firestore);
       }
     }
@@ -156,6 +149,7 @@ export async function saveCloudDocument(
       .forEach((item) => cleanup.delete(item.ref));
     await cleanup.commit().catch(() => undefined);
   }
+  onProgress?.(100);
   return saved as CloudDocument;
 }
 
