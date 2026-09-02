@@ -1,7 +1,8 @@
 'use client';
 
 import {
-  FormEvent,
+  SubmitEvent,
+  useRef,
   ReactNode,
   useEffect,
   useId,
@@ -43,6 +44,8 @@ import {
   signInWithPopup,
   signOut,
   updateProfile,
+  sendPasswordResetEmail,
+  sendEmailVerification,
   type User,
 } from 'firebase/auth';
 import { auth, firebaseReady } from '@/lib/firebase';
@@ -55,42 +58,28 @@ import {
   type CloudDocument,
 } from '@/lib/readycar-cloud';
 
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { AccountTools } from '@/components/account-tools';
+import { daysUntil, formatExpiry } from '@/lib/expiry';
+import { watchAccount, changeAccount, type Vehicle } from '@/lib/account-cloud';
+
 type View = 'summary' | 'documents' | 'vehicles' | 'alerts';
 type Profile = { name: string };
-type Vehicle = {
-  id: number;
-  nickname: string;
-  brand: string;
-  model: string;
-  year: string;
-  plate: string;
-  vehicleType?: 'car' | 'motorcycle';
-};
+function fieldText(data: FormData, key: string) {
+  const value = data.get(key);
+  return typeof value === 'string' ? value.trim() : '';
+}
 type VehicleDocument = CloudDocument;
 
-const profileKey = 'readycar-profile';
-const vehiclesKey = 'readycar-vehicles';
-const alertsKey = 'readycar-alert-days';
 const notificationsKey = 'readycar-notifications';
-const dateFormat = new Intl.DateTimeFormat('es-CL', {
-  day: '2-digit',
-  month: 'short',
-  year: 'numeric',
-});
 const todayFormat = new Intl.DateTimeFormat('es-CL', {
   weekday: 'long',
   day: 'numeric',
   month: 'long',
 });
 
-function daysUntil(date: string) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return Math.ceil(
-    (new Date(`${date}T12:00:00`).getTime() - today.getTime()) / 86400000,
-  );
-}
 function statusFor(date: string, alertDays: number[]) {
+  if (!date) return { label: 'Sin vencimiento', tone: 'green' };
   const days = daysUntil(date);
   if (days < 0)
     return { label: `Vencido hace ${Math.abs(days)} días`, tone: 'red' };
@@ -110,9 +99,15 @@ function vapidKey(value: string) {
 }
 
 export default function Home() {
+  const [accountReady, setAccountReady] = useState(false);
+  const [editingVehicle, setEditingVehicle] = useState<Vehicle | null>(null);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const [statusFilter, setStatusFilter] = useState('all');
   const [profile, setProfile] = useState<Profile | null>(null);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
-  const [documents, setDocuments] = useState<VehicleDocument[]>([]);
+  const [allDocuments, setDocuments] = useState<VehicleDocument[]>([]);
+  const documents = allDocuments.filter((item) => !item.archived);
   const [alertDays, setAlertDays] = useState([45, 15, 5]);
   const [view, setView] = useState<View>('summary');
   const [query, setQuery] = useState('');
@@ -132,20 +127,39 @@ export default function Home() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
 
   useEffect(() => {
-    const savedProfile = localStorage.getItem(profileKey);
-    const savedVehicles = localStorage.getItem(vehiclesKey);
-    const savedAlerts = localStorage.getItem(alertsKey);
-    if (savedProfile) setProfile(JSON.parse(savedProfile));
-    else setShowOnboarding(true);
-    if (savedVehicles) setVehicles(JSON.parse(savedVehicles));
-    if (savedAlerts) setAlertDays(JSON.parse(savedAlerts));
-    setNotificationsEnabled(
-      localStorage.getItem(notificationsKey) === 'true' &&
-        Notification.permission === 'granted',
-    );
+    setNotificationsEnabled(false);
     if ('serviceWorker' in navigator)
       navigator.serviceWorker.register('/sw.js').catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    setAccountReady(false);
+    setProfile(null);
+    setVehicles([]);
+    setDocuments([]);
+    setShowOnboarding(false);
+    if (!user) return;
+    const uid = user.uid;
+    setNotificationsEnabled(
+      localStorage.getItem(notificationsKey + uid) === 'true' &&
+        'Notification' in window &&
+        Notification.permission === 'granted',
+    );
+    return watchAccount(
+      uid,
+      (account) => {
+        setProfile(account?.profile || null);
+        setVehicles(account?.vehicles || []);
+        setAlertDays(
+          account?.alertDays?.length ? account.alertDays : [45, 15, 5],
+        );
+        setAccountReady(true);
+        setShowOnboarding(!account);
+      },
+      () =>
+        notify('No pudimos cargar tu garaje. Recarga para volver a intentar.'),
+    );
+  }, [user]);
 
   useEffect(() => {
     if (!user) {
@@ -167,41 +181,8 @@ export default function Home() {
       setUser(nextUser);
       setAuthLoading(false);
       setShowAuth(!nextUser);
-      if (nextUser?.displayName && !localStorage.getItem(profileKey)) {
-        const nextProfile = { name: nextUser.displayName };
-        setProfile(nextProfile);
-        localStorage.setItem(profileKey, JSON.stringify(nextProfile));
-      }
     });
   }, []);
-
-  useEffect(() => {
-    if (
-      !notificationsEnabled ||
-      !documents.length ||
-      Notification.permission !== 'granted'
-    )
-      return;
-    const urgent = documents.filter(
-      (document) =>
-        daysUntil(document.expirationDate) <= Math.max(...alertDays),
-    );
-    const stamp = new Date().toISOString().slice(0, 10);
-    const sentKey = `readycar-notified-${stamp}`;
-    if (urgent.length && !localStorage.getItem(sentKey)) {
-      const overdueCount = urgent.filter(
-        (document) => daysUntil(document.expirationDate) < 0,
-      ).length;
-      new Notification('ReadyCar · Documentos por revisar', {
-        body: overdueCount
-          ? `${overdueCount} vencido(s) y ${urgent.length - overdueCount} próximo(s) a vencer.`
-          : `${urgent.length} documento(s) próximo(s) a vencer.`,
-        icon: '/favicon.svg',
-        tag: 'readycar-daily',
-      });
-      localStorage.setItem(sentKey, 'true');
-    }
-  }, [documents, alertDays, notificationsEnabled]);
 
   function notify(message: string) {
     setToast(message);
@@ -210,14 +191,10 @@ export default function Home() {
   function vehicleFor(id: number) {
     return vehicles.find((vehicle) => vehicle.id === id);
   }
-  function saveVehicles(next: Vehicle[]) {
-    setVehicles(next);
-    localStorage.setItem(vehiclesKey, JSON.stringify(next));
-  }
 
   const filteredDocuments = useMemo(
     () =>
-      documents
+      allDocuments
         .filter((document) => {
           const vehicle = vehicles.find(
             (item) => item.id === document.vehicleId,
@@ -225,20 +202,34 @@ export default function Home() {
           const text =
             `${document.name} ${document.type} ${vehicle?.plate || ''} ${vehicle?.brand || ''}`.toLowerCase();
           return (
+            (statusFilter === 'history'
+              ? Boolean(document.archived)
+              : !document.archived) &&
+            (statusFilter === 'history' ||
+              statusFilter === 'all' ||
+              (statusFilter === 'overdue'
+                ? daysUntil(document.expirationDate) < 0
+                : statusFilter === 'soon'
+                  ? daysUntil(document.expirationDate) >= 0 &&
+                    daysUntil(document.expirationDate) <= Math.max(...alertDays)
+                  : daysUntil(document.expirationDate) >= 0)) &&
             text.includes(query.toLowerCase()) &&
             (vehicleFilter === 'all' || document.vehicleId === vehicleFilter)
           );
         })
         .sort((a, b) => a.expirationDate.localeCompare(b.expirationDate)),
-    [documents, query, vehicleFilter, vehicles],
+    [allDocuments, query, vehicleFilter, vehicles, statusFilter, alertDays],
   );
   const expiring = documents.filter(
-    (document) => daysUntil(document.expirationDate) <= Math.max(...alertDays),
+    (document) =>
+      !vehicles.some(
+        (vehicle) => vehicle.id === document.vehicleId && vehicle.archived,
+      ) && daysUntil(document.expirationDate) <= Math.max(...alertDays),
   ).length;
   const overdue = documents.filter(
     (document) => daysUntil(document.expirationDate) < 0,
   ).length;
-  const current = documents.length - expiring;
+  const current = documents.length - overdue;
   const initials =
     profile?.name
       .split(' ')
@@ -247,44 +238,93 @@ export default function Home() {
       .join('')
       .toUpperCase() || 'RC';
 
-  function completeOnboarding(event: FormEvent<HTMLFormElement>) {
+  async function completeOnboarding(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const nextProfile = { name: String(data.get('name')).trim() };
+    const nextProfile = { name: fieldText(data, 'name').trim() };
     const firstVehicle: Vehicle = {
-      id: Date.now(),
-      nickname: String(data.get('nickname') || 'Mi vehículo'),
-      brand: String(data.get('brand')),
-      model: String(data.get('model')),
-      year: String(data.get('year')),
-      plate: String(data.get('plate')).toUpperCase(),
+      id: editingVehicle?.id || Date.now(),
+      nickname: fieldText(data, 'nickname') || 'Mi vehículo',
+      brand: fieldText(data, 'brand'),
+      model: fieldText(data, 'model'),
+      year: fieldText(data, 'year'),
+      plate: fieldText(data, 'plate').toUpperCase(),
       vehicleType:
         data.get('vehicleType') === 'motorcycle' ? 'motorcycle' : 'car',
     };
-    setProfile(nextProfile);
-    localStorage.setItem(profileKey, JSON.stringify(nextProfile));
-    saveVehicles([firstVehicle]);
-    setShowOnboarding(false);
-    notify('Tu cuenta local está lista');
+    if (!user || savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await changeAccount(user.uid, (account) => ({
+        ...account,
+        profile: nextProfile,
+        vehicles: account.profile.name ? account.vehicles : [firstVehicle],
+      }));
+      setShowOnboarding(false);
+      notify('Perfil guardado en tu cuenta');
+    } catch {
+      notify('No pudimos guardar el perfil. Inténtalo nuevamente.');
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   }
-  function addVehicle(event: FormEvent<HTMLFormElement>) {
+  async function addVehicle(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const vehicle: Vehicle = {
-      id: Date.now(),
-      nickname: String(data.get('nickname') || 'Mi vehículo'),
-      brand: String(data.get('brand')),
-      model: String(data.get('model')),
-      year: String(data.get('year')),
-      plate: String(data.get('plate')).toUpperCase(),
+      id: editingVehicle?.id || Date.now(),
+      nickname: fieldText(data, 'nickname') || 'Mi vehículo',
+      brand: fieldText(data, 'brand'),
+      model: fieldText(data, 'model'),
+      year: fieldText(data, 'year'),
+      plate: fieldText(data, 'plate').toUpperCase(),
       vehicleType:
         data.get('vehicleType') === 'motorcycle' ? 'motorcycle' : 'car',
     };
-    saveVehicles([...vehicles, vehicle]);
-    setShowVehicleForm(false);
-    notify('Vehículo agregado');
+    if (!user || savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await changeAccount(user.uid, (account) => {
+        if (
+          account.vehicles.some(
+            (item) =>
+              item.id !== vehicle.id &&
+              item.plate.replace(/[^A-Z0-9]/gi, '').toUpperCase() ===
+                vehicle.plate.replace(/[^A-Z0-9]/gi, '').toUpperCase(),
+          )
+        )
+          throw new Error('Ya registraste esta patente');
+        return {
+          ...account,
+          vehicles: editingVehicle
+            ? account.vehicles.map((item) =>
+                item.id === vehicle.id
+                  ? { ...vehicle, archived: item.archived || false }
+                  : item,
+              )
+            : [...account.vehicles, vehicle],
+        };
+      });
+      setShowVehicleForm(false);
+      setEditingVehicle(null);
+      notify('Vehículo guardado');
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : 'No pudimos guardar el vehículo',
+      );
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   }
-  async function saveDocument(event: FormEvent<HTMLFormElement>) {
+  async function saveDocument(event: SubmitEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (savingRef.current) return;
     if (!user) {
       setShowAuth(true);
       return;
@@ -294,16 +334,23 @@ export default function Home() {
     const selectedFile = data.get('file') as File;
     const document: VehicleDocument = {
       id: editingDocument?.id || Date.now(),
-      name: String(data.get('name')),
-      type: String(data.get('type')),
+      name: fieldText(data, 'name'),
+      type: fieldText(data, 'type'),
       vehicleId: Number(data.get('vehicleId')),
-      expirationDate: String(data.get('expirationDate')),
-      notes: String(data.get('notes') || ''),
+      expirationDate: fieldText(data, 'expirationDate'),
+      notes: fieldText(data, 'notes') || '',
       fileName: editingDocument?.fileName || null,
       fileSize: editingDocument?.fileSize || null,
       fileType: editingDocument?.fileType || null,
+      fileVersion: editingDocument?.fileVersion || null,
       chunkCount: editingDocument?.chunkCount || 0,
+      ...(editingDocument?.previousId
+        ? { previousId: editingDocument.previousId }
+        : {}),
+      archived: editingDocument?.archived || false,
     };
+    savingRef.current = true;
+    setSaving(true);
     try {
       await saveCloudDocument(user, document, selectedFile);
       setShowDocumentForm(false);
@@ -319,6 +366,9 @@ export default function Home() {
           ? error.message
           : 'No pudimos subir el documento',
       );
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
   }
   async function deleteDocument(document: VehicleDocument) {
@@ -329,81 +379,110 @@ export default function Home() {
     )
       return;
     if (!user) return;
-    await deleteCloudDocument(user.uid, document);
-    notify('Documento eliminado');
+    try {
+      await deleteCloudDocument(user.uid, document);
+      notify('Documento eliminado');
+    } catch {
+      notify('No pudimos eliminar el documento. Inténtalo de nuevo.');
+    }
   }
-  function updateAlerts(days: number) {
+  async function updateAlerts(days: number) {
     const next = alertDays.includes(days)
       ? alertDays.filter((item) => item !== days)
       : [...alertDays, days].sort((a, b) => b - a);
     if (!next.length) return;
-    setAlertDays(next);
-    localStorage.setItem(alertsKey, JSON.stringify(next));
+    if (!user) return;
+    try {
+      await changeAccount(user.uid, (account) => ({
+        ...account,
+        alertDays: next,
+      }));
+    } catch {
+      notify('No pudimos guardar tus preferencias');
+    }
   }
   async function toggleNotifications() {
-    if (!('Notification' in window)) {
-      notify('Este navegador no admite notificaciones');
-      return;
-    }
-    if (!user) {
-      setShowAuth(true);
-      notify('Inicia sesión para activar notificaciones');
-      return;
-    }
-    const registration = await navigator.serviceWorker.ready;
-    const currentSubscription =
-      await registration.pushManager.getSubscription();
-    if (notificationsEnabled) {
-      if (currentSubscription) {
-        await fetch('/api/notifications/subscribe', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${await user.getIdToken()}`,
-          },
-          body: JSON.stringify({
-            subscription: currentSubscription.toJSON(),
-            enabled: false,
-          }),
-        });
-        await currentSubscription.unsubscribe();
+    try {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        notify(
+          'Este navegador no admite avisos. Puedes consultar tus alertas aquí.',
+        );
+        return;
       }
-      setNotificationsEnabled(false);
-      localStorage.setItem(notificationsKey, 'false');
-      notify('Notificaciones pausadas');
-      return;
-    }
-    const permission = await Notification.requestPermission();
-    const publicKey = process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY;
-    const subscription =
-      permission === 'granted' && publicKey
-        ? await registration.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: vapidKey(publicKey),
+      if (!('Notification' in window)) {
+        notify('Este navegador no admite notificaciones');
+        return;
+      }
+      if (!user) {
+        setShowAuth(true);
+        notify('Inicia sesión para activar notificaciones');
+        return;
+      }
+      const registration = await navigator.serviceWorker.ready;
+      const currentSubscription =
+        await registration.pushManager.getSubscription();
+      if (notificationsEnabled) {
+        if (currentSubscription) {
+          const removal = await fetch('/api/notifications/subscribe', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${await user.getIdToken()}`,
+            },
+            body: JSON.stringify({
+              subscription: currentSubscription.toJSON(),
+              enabled: false,
+            }),
+          });
+          if (!removal.ok) throw new Error('No se pudo pausar');
+          await currentSubscription.unsubscribe();
+        }
+        setNotificationsEnabled(false);
+        localStorage.setItem(notificationsKey + user.uid, 'false');
+        notify('Notificaciones pausadas');
+        return;
+      }
+      const permission = await Notification.requestPermission();
+      const publicKey = process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY;
+      const subscription =
+        permission === 'granted' && publicKey
+          ? await registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: vapidKey(publicKey),
+            })
+          : null;
+      const response = subscription
+        ? await fetch('/api/notifications/subscribe', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${await user.getIdToken()}`,
+            },
+            body: JSON.stringify({ subscription: subscription.toJSON() }),
           })
         : null;
-    const response = subscription
-      ? await fetch('/api/notifications/subscribe', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${await user.getIdToken()}`,
-          },
-          body: JSON.stringify({ subscription: subscription.toJSON() }),
-        })
-      : null;
-    const enabled = Boolean(subscription && response?.ok);
-    setNotificationsEnabled(enabled);
-    localStorage.setItem(notificationsKey, String(enabled));
-    if (enabled) {
-      new Notification('ReadyCar está listo', {
-        body: 'Te avisaremos aunque la aplicación esté cerrada.',
-        icon: '/favicon.svg',
-      });
-      notify('Notificaciones automáticas activadas');
-    } else notify('Debes permitir las notificaciones en el navegador');
+      const enabled = Boolean(subscription && response?.ok);
+      setNotificationsEnabled(enabled);
+      localStorage.setItem(notificationsKey, String(enabled));
+      if (enabled) {
+        await registration.showNotification('ReadyCar está listo', {
+          body: 'Te avisaremos aunque la aplicación esté cerrada.',
+          icon: '/favicon.svg',
+        });
+        notify('Notificaciones automáticas activadas');
+      } else
+        notify(
+          'No se pudieron activar los avisos. Revisa los permisos o inténtalo más tarde.',
+        );
+    } catch {
+      notify('No pudimos cambiar las notificaciones. Inténtalo nuevamente.');
+    }
   }
   async function logout() {
+    setVehicles([]);
+    setProfile(null);
+    setDocuments([]);
+    setNotificationsEnabled(false);
     if (auth) await signOut(auth);
     setShowAuth(true);
     notify('Sesión cerrada');
@@ -411,6 +490,14 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#f4f3ef] text-[#17231d]">
+      {saving && (
+        <div
+          role="status"
+          className="fixed bottom-5 left-5 z-[60] rounded-xl bg-[#183f33] p-4 text-sm text-white"
+        >
+          Guardando…
+        </div>
+      )}
       <header className="sticky top-0 z-30 flex h-20 items-center justify-between border-b border-[#dfe1dc] bg-[#f8f7f3]/95 px-5 backdrop-blur md:px-9">
         <div className="flex items-center gap-3">
           <button
@@ -424,7 +511,10 @@ export default function Home() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setView('alerts')}
+            onClick={() => {
+              setMobileNav(false);
+              setView('alerts');
+            }}
             className="relative grid size-10 place-items-center rounded-xl border border-[#d9ddd7] bg-white text-[#526159]"
             aria-label="Alertas"
           >
@@ -481,28 +571,40 @@ export default function Home() {
               active={view === 'summary'}
               icon={<Gauge size={18} />}
               label="Resumen"
-              onClick={() => setView('summary')}
+              onClick={() => {
+                setMobileNav(false);
+                setView('summary');
+              }}
             />
             <NavButton
               active={view === 'documents'}
               icon={<FileText size={18} />}
               label="Documentos"
               count={documents.length}
-              onClick={() => setView('documents')}
+              onClick={() => {
+                setMobileNav(false);
+                setView('documents');
+              }}
             />
             <NavButton
               active={view === 'vehicles'}
               icon={<CarFront size={18} />}
               label="Vehículos"
               count={vehicles.length}
-              onClick={() => setView('vehicles')}
+              onClick={() => {
+                setMobileNav(false);
+                setView('vehicles');
+              }}
             />
             <NavButton
               active={view === 'alerts'}
               icon={<Bell size={18} />}
               label="Alertas"
               count={expiring}
-              onClick={() => setView('alerts')}
+              onClick={() => {
+                setMobileNav(false);
+                setView('alerts');
+              }}
             />
           </nav>
           <div className="mt-auto rounded-2xl border border-[#dce2dc] bg-[#eaf0eb] p-4">
@@ -526,6 +628,7 @@ export default function Home() {
 
         <section className="min-w-0 flex-1 px-5 py-8 md:px-10 md:py-10">
           <div className="mx-auto max-w-6xl">
+            {user && !accountReady && <p role="status">Cargando tu garaje…</p>}
             {view === 'summary' && (
               <Summary
                 profile={profile}
@@ -543,6 +646,118 @@ export default function Home() {
                 onViewDocuments={() => setView('documents')}
                 vehicleFor={vehicleFor}
               />
+            )}
+            {view === 'documents' && (
+              <div className="mb-4 flex flex-wrap gap-3">
+                <select
+                  aria-label="Filtrar por estado"
+                  className="rounded-xl border p-3"
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value)}
+                >
+                  <option value="all">Todos los estados</option>
+                  <option value="current">Vigentes</option>
+                  <option value="soon">Próximos a vencer</option>
+                  <option value="overdue">Vencidos</option>
+                  <option value="history">Historial de renovaciones</option>
+                </select>
+                <button
+                  className="rounded-xl border px-4"
+                  onClick={async () => {
+                    if (!user || savingRef.current) return;
+                    savingRef.current = true;
+                    setSaving(true);
+                    try {
+                      const files = [];
+                      for (const item of allDocuments) {
+                        const blob = await getCloudDocumentBlob(user.uid, item);
+                        const bytes = blob
+                          ? new Uint8Array(await blob.arrayBuffer())
+                          : null;
+                        let binary = '';
+                        if (bytes)
+                          for (const byte of bytes)
+                            binary += String.fromCharCode(byte);
+                        files.push({
+                          ...item,
+                          fileBase64: bytes ? btoa(binary) : null,
+                        });
+                      }
+                      const url = URL.createObjectURL(
+                        new Blob(
+                          [
+                            JSON.stringify({
+                              version: 1,
+                              exportedAt: new Date().toISOString(),
+                              profile,
+                              vehicles,
+                              alertDays,
+                              documents: files,
+                            }),
+                          ],
+                          { type: 'application/json' },
+                        ),
+                      );
+                      const link = window.document.createElement('a');
+                      link.href = url;
+                      link.download = 'readycar-respaldo.json';
+                      link.click();
+                      setTimeout(() => URL.revokeObjectURL(url), 1000);
+                      notify('Respaldo descargado');
+                    } catch {
+                      notify('No pudimos completar el respaldo');
+                    } finally {
+                      savingRef.current = false;
+                      setSaving(false);
+                    }
+                  }}
+                >
+                  Descargar respaldo con archivos
+                </button>
+                <button
+                  className="rounded-xl border px-4 py-3"
+                  onClick={() => {
+                    const escape = (value: string) =>
+                      value
+                        .replace(/\\/g, '\\\\')
+                        .replace(/\n/g, '\\n')
+                        .replace(/,/g, '\\,')
+                        .replace(/;/g, '\\;');
+                    const lines = [
+                      'BEGIN:VCALENDAR',
+                      'VERSION:2.0',
+                      'PRODID:-//ReadyCar//Vencimientos//ES',
+                      ...documents
+                        .filter((item) => item.expirationDate)
+                        .flatMap((item) => [
+                          'BEGIN:VEVENT',
+                          'UID:' + item.id + '@readycar',
+                          'DTSTAMP:' +
+                            new Date()
+                              .toISOString()
+                              .replace(/[-:]/g, '')
+                              .replace(/\.\d{3}/, ''),
+                          'DTSTART;VALUE=DATE:' +
+                            item.expirationDate.replace(/-/g, ''),
+                          'SUMMARY:' + escape(item.name),
+                          'DESCRIPTION:' + escape(item.notes || ''),
+                          'END:VEVENT',
+                        ]),
+                      'END:VCALENDAR',
+                    ];
+                    const url = URL.createObjectURL(
+                      new Blob([lines.join('\r\n')], { type: 'text/calendar' }),
+                    );
+                    const a = window.document.createElement('a');
+                    a.href = url;
+                    a.download = 'readycar-vencimientos.ics';
+                    a.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                  }}
+                >
+                  Exportar calendario
+                </button>
+              </div>
             )}
             {view === 'documents' && (
               <DocumentsView
@@ -565,6 +780,21 @@ export default function Home() {
                 onDownload={(document) =>
                   user && downloadCloudDocument(user.uid, document)
                 }
+                onRenew={(document) => {
+                  setEditingDocument({
+                    ...document,
+                    id: Date.now(),
+                    previousId: document.id,
+                    expirationDate: '',
+                    fileName: null,
+                    fileSize: null,
+                    fileType: null,
+                    fileVersion: null,
+                    chunkCount: 0,
+                    archived: false,
+                  });
+                  setShowDocumentForm(true);
+                }}
                 onPreview={setPreviewDocument}
                 onDelete={deleteDocument}
               />
@@ -573,7 +803,48 @@ export default function Home() {
               <VehiclesView
                 vehicles={vehicles}
                 documents={documents}
-                onAdd={() => setShowVehicleForm(true)}
+                alertDays={alertDays}
+                onAdd={() => {
+                  setEditingVehicle(null);
+                  setShowVehicleForm(true);
+                }}
+                onEdit={(vehicle) => {
+                  setEditingVehicle(vehicle);
+                  setShowVehicleForm(true);
+                }}
+                onArchive={async (vehicle) => {
+                  try {
+                    await changeAccount(user!.uid, (account) => ({
+                      ...account,
+                      vehicles: account.vehicles.map((item) =>
+                        item.id === vehicle.id
+                          ? { ...item, archived: !item.archived }
+                          : item,
+                      ),
+                    }));
+                  } catch {
+                    notify('No pudimos actualizar el vehículo');
+                  }
+                }}
+                onDelete={async (vehicle) => {
+                  if (
+                    allDocuments.some((item) => item.vehicleId === vehicle.id)
+                  ) {
+                    notify('Archiva el vehículo para conservar sus documentos');
+                    return;
+                  }
+                  if (confirm('¿Eliminar este vehículo sin documentos?'))
+                    try {
+                      await changeAccount(user!.uid, (account) => ({
+                        ...account,
+                        vehicles: account.vehicles.filter(
+                          (item) => item.id !== vehicle.id,
+                        ),
+                      }));
+                    } catch {
+                      notify('No pudimos eliminar el vehículo');
+                    }
+                }}
               />
             )}
             {view === 'alerts' && (
@@ -586,6 +857,9 @@ export default function Home() {
                 onToggleNotifications={toggleNotifications}
               />
             )}
+            {user && accountReady && view === 'summary' && (
+              <AccountTools user={user} notify={notify} />
+            )}
           </div>
         </section>
       </div>
@@ -595,12 +869,59 @@ export default function Home() {
           profile={profile}
           firstVehicle={vehicles[0]}
           onClose={() => profile && setShowOnboarding(false)}
+          onRecover={async () => {
+            if (!user) return;
+            try {
+              const legacy = JSON.parse(
+                localStorage.getItem('readycar-vehicles') || '[]',
+              );
+              if (
+                !Array.isArray(legacy) ||
+                !legacy.length ||
+                legacy.some(
+                  (item) =>
+                    !Number.isSafeInteger(item.id) ||
+                    typeof item.plate !== 'string',
+                )
+              ) {
+                notify('No encontramos un garaje anterior válido');
+                return;
+              }
+              if (
+                !confirm(
+                  '¿El garaje guardado anteriormente en este navegador es tuyo? Se asociará a la cuenta actual.',
+                )
+              )
+                return;
+              await changeAccount(user.uid, (account) => ({
+                ...account,
+                profile: { name: user.displayName || 'Mi cuenta' },
+                vehicles: [
+                  ...account.vehicles,
+                  ...legacy.filter(
+                    (item) =>
+                      !account.vehicles.some(
+                        (current) => current.id === item.id,
+                      ),
+                  ),
+                ],
+              }));
+              setShowOnboarding(false);
+              notify('Garaje anterior recuperado');
+            } catch {
+              notify('No pudimos recuperar el garaje anterior');
+            }
+          }}
           onSubmit={completeOnboarding}
         />
       )}
       {showVehicleForm && (
         <VehicleForm
-          onClose={() => setShowVehicleForm(false)}
+          vehicle={editingVehicle}
+          onClose={() => {
+            setShowVehicleForm(false);
+            setEditingVehicle(null);
+          }}
           onSubmit={addVehicle}
         />
       )}
@@ -715,7 +1036,13 @@ function Summary({
   onViewDocuments: () => void;
   vehicleFor: (id: number) => Vehicle | undefined;
 }) {
-  const urgent = [...documents]
+  const urgent = documents
+    .filter(
+      (document) =>
+        !vehicles.some(
+          (vehicle) => vehicle.id === document.vehicleId && vehicle.archived,
+        ),
+    )
     .filter(
       (document) =>
         daysUntil(document.expirationDate) <= Math.max(...alertDays),
@@ -749,7 +1076,7 @@ function Summary({
           icon={<FileCheck2 />}
           value={current}
           title="Documentos vigentes"
-          description="Sin acciones pendientes"
+          description="Incluye los próximos a vencer"
           kind="green"
         />
         <Stat
@@ -808,9 +1135,7 @@ function Summary({
                     </div>
                     <div className="text-right">
                       <p className="text-xs font-semibold">
-                        {dateFormat.format(
-                          new Date(`${document.expirationDate}T12:00:00`),
-                        )}
+                        {formatExpiry(document.expirationDate)}
                       </p>
                       <span
                         className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-bold status-${status.tone}`}
@@ -825,7 +1150,11 @@ function Summary({
           ) : (
             <Empty
               icon={<FileText />}
-              title="Aún no tienes documentos"
+              title={
+                documents.length
+                  ? 'Sin vencimientos próximos'
+                  : 'Aún no tienes documentos'
+              }
               text="Agrega el primero para comenzar a recibir alertas."
               action="Agregar documento"
               onAction={onAddDocument}
@@ -908,6 +1237,7 @@ function DocumentsView({
   onEdit,
   onDownload,
   onPreview,
+  onRenew,
   onDelete,
 }: {
   documents: VehicleDocument[];
@@ -921,6 +1251,7 @@ function DocumentsView({
   onEdit: (document: VehicleDocument) => void;
   onDownload: (document: VehicleDocument) => void;
   onPreview: (document: VehicleDocument) => void;
+  onRenew: (document: VehicleDocument) => void;
   onDelete: (document: VehicleDocument) => void;
 }) {
   return (
@@ -975,6 +1306,7 @@ function DocumentsView({
                 onEdit={() => onEdit(document)}
                 onDownload={() => onDownload(document)}
                 onPreview={() => onPreview(document)}
+                onRenew={() => onRenew(document)}
                 onDelete={() => onDelete(document)}
               />
             ))}
@@ -999,6 +1331,7 @@ function DocumentRow({
   onEdit,
   onDownload,
   onPreview,
+  onRenew,
   onDelete,
 }: {
   document: VehicleDocument;
@@ -1007,6 +1340,7 @@ function DocumentRow({
   onEdit: () => void;
   onDownload: () => void;
   onPreview: () => void;
+  onRenew: () => void;
   onDelete: () => void;
 }) {
   const status = statusFor(document.expirationDate, alertDays);
@@ -1035,7 +1369,7 @@ function DocumentRow({
       <div>
         <p className="table-label">Vencimiento</p>
         <p className="mt-1 text-sm font-semibold">
-          {dateFormat.format(new Date(`${document.expirationDate}T12:00:00`))}
+          {formatExpiry(document.expirationDate)}
         </p>
         <span
           className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-bold status-${status.tone}`}
@@ -1043,7 +1377,21 @@ function DocumentRow({
           {status.label}
         </span>
       </div>
-      <div className="flex gap-1">
+      {document.notes && (
+        <p className="text-xs text-[#68756e] md:col-span-full">
+          {document.notes}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-1">
+        {!document.archived && (
+          <button
+            onClick={onRenew}
+            className="row-action"
+            title="Renovar conservando el anterior"
+          >
+            <CalendarClock size={16} />
+          </button>
+        )}
         <button
           onClick={onPreview}
           disabled={!document.chunkCount}
@@ -1180,11 +1528,19 @@ function DocumentPreview({
 function VehiclesView({
   vehicles,
   documents,
+  alertDays,
   onAdd,
+  onEdit,
+  onArchive,
+  onDelete,
 }: {
   vehicles: Vehicle[];
   documents: VehicleDocument[];
+  alertDays: number[];
   onAdd: () => void;
+  onEdit: (vehicle: Vehicle) => void;
+  onArchive: (vehicle: Vehicle) => void;
+  onDelete: (vehicle: Vehicle) => void;
 }) {
   return (
     <>
@@ -1217,6 +1573,14 @@ function VehiclesView({
                   {vehicle.year}
                 </span>
               </div>
+              <div className="mt-4 flex flex-wrap gap-3 text-xs">
+                <button onClick={() => onEdit(vehicle)}>Editar</button>
+                <button onClick={() => onArchive(vehicle)}>
+                  {vehicle.archived ? 'Restaurar' : 'Archivar'}
+                </button>
+                <button onClick={() => onDelete(vehicle)}>Eliminar</button>
+                {vehicle.archived && <strong>Archivado</strong>}
+              </div>
               <p className="mt-6 text-xs font-bold uppercase tracking-[.12em] text-[#7b867f]">
                 {vehicle.nickname}
               </p>
@@ -1225,6 +1589,24 @@ function VehiclesView({
               </h2>
               <p className="mt-2 inline-flex rounded-lg bg-[#edf1ee] px-3 py-1 font-mono text-sm font-bold tracking-wider">
                 {vehicle.plate}
+              </p>
+              <p className="mt-4 text-xs leading-5 text-[#68756e]">
+                Sin registrar:{' '}
+                {[
+                  'Permiso de circulación',
+                  'Revisión técnica',
+                  'SOAP',
+                  'Padrón',
+                ]
+                  .filter(
+                    (type) =>
+                      !documents.some(
+                        (item) =>
+                          item.vehicleId === vehicle.id && item.type === type,
+                      ),
+                  )
+                  .join(', ') ||
+                  'Tienes las cuatro categorías básicas registradas'}
               </p>
               <div className="mt-6 flex items-center justify-between border-t border-[#ecece8] pt-4 text-xs text-[#6e7a73]">
                 <span>
@@ -1235,7 +1617,8 @@ function VehiclesView({
                     documents.filter(
                       (document) =>
                         document.vehicleId === vehicle.id &&
-                        daysUntil(document.expirationDate) <= 45,
+                        daysUntil(document.expirationDate) <=
+                          Math.max(...alertDays),
                     ).length
                   }{' '}
                   próximos
@@ -1278,6 +1661,12 @@ function AlertsView({
   const alerts = documents
     .filter(
       (document) =>
+        !vehicles.some(
+          (vehicle) => vehicle.id === document.vehicleId && vehicle.archived,
+        ),
+    )
+    .filter(
+      (document) =>
         daysUntil(document.expirationDate) <= Math.max(...alertDays),
     )
     .sort((a, b) => a.expirationDate.localeCompare(b.expirationDate));
@@ -1313,9 +1702,7 @@ function AlertsView({
                       </p>
                       <p className="mt-1 text-xs text-[#7b857e]">
                         {vehicle?.plate} ·{' '}
-                        {dateFormat.format(
-                          new Date(`${document.expirationDate}T12:00:00`),
-                        )}
+                        {formatExpiry(document.expirationDate)}
                       </p>
                     </div>
                     <span
@@ -1468,15 +1855,20 @@ function Modal({
   locked?: boolean;
 }) {
   return (
-    <div
-      role="presentation"
-      className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-[#10241c]/55 p-4 backdrop-blur-sm"
-      onMouseDown={(event) =>
-        !locked && event.target === event.currentTarget && onClose()
-      }
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open && !locked) onClose();
+      }}
     >
-      {children}
-    </div>
+      <DialogContent
+        showCloseButton={false}
+        className="w-auto max-w-[calc(100%-2rem)]! max-h-[95dvh] overflow-y-auto border-0 bg-transparent p-0 shadow-none ring-0 sm:max-w-5xl!"
+      >
+        <DialogTitle className="sr-only">ReadyCar</DialogTitle>
+        {children}
+      </DialogContent>
+    </Dialog>
   );
 }
 function AuthModal({
@@ -1494,14 +1886,14 @@ function AuthModal({
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  async function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!auth) return;
     setBusy(true);
     setError('');
     const data = new FormData(event.currentTarget);
-    const email = String(data.get('email'));
-    const password = String(data.get('password'));
+    const email = fieldText(data, 'email');
+    const password = data.get('password') as string;
     try {
       if (registering) {
         const credential = await createUserWithEmailAndPassword(
@@ -1509,7 +1901,7 @@ function AuthModal({
           email,
           password,
         );
-        const name = String(data.get('name')).trim();
+        const name = fieldText(data, 'name').trim();
         if (name) await updateProfile(credential.user, { displayName: name });
       } else await signInWithEmailAndPassword(auth, email, password);
       onSignedIn();
@@ -1561,6 +1953,61 @@ function AuthModal({
               <p className="truncate text-xs text-[#6f7b74]">{user.email}</p>
             </div>
           </div>
+          {!user.emailVerified && (
+            <button
+              className="mt-4 text-sm underline"
+              onClick={async () => {
+                try {
+                  await sendEmailVerification(user);
+                  setError('Revisa tu correo para verificar la cuenta');
+                } catch {
+                  setError('No pudimos enviar el correo. Inténtalo más tarde.');
+                }
+              }}
+            >
+              Verificar mi correo
+            </button>
+          )}
+          {error && (
+            <p role="status" className="mt-3 text-sm">
+              {error}
+            </p>
+          )}
+          <button
+            type="button"
+            disabled={busy}
+            className="mt-4 block text-sm text-red-700 underline"
+            onClick={async () => {
+              if (
+                !confirm(
+                  '¿Eliminar tu cuenta y todos tus vehículos, documentos y archivos? Esta acción no se puede deshacer. Descarga un respaldo antes si lo necesitas.',
+                )
+              )
+                return;
+              setBusy(true);
+              try {
+                const response = await fetch('/api/account', {
+                  method: 'DELETE',
+                  headers: {
+                    Authorization: 'Bearer ' + (await user.getIdToken()),
+                  },
+                });
+                const data = (await response.json()) as { error?: string };
+                if (!response.ok) throw new Error(data.error);
+                onLogout();
+              } catch (error) {
+                setError(
+                  error instanceof Error
+                    ? error.message
+                    : 'No pudimos eliminar la cuenta',
+                );
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            Eliminar cuenta y datos
+          </button>
           <button
             onClick={onLogout}
             className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl border border-[#d9ddd7] py-3 text-sm font-bold text-[#9d4336]"
@@ -1678,6 +2125,30 @@ function AuthModal({
           className="w-full rounded-xl border border-[#d8ddd8] bg-white py-3 text-sm font-bold disabled:opacity-50"
         >
           Google
+        </button>
+        <button
+          type="button"
+          className="mt-4 w-full text-sm underline"
+          onClick={async (event) => {
+            const form = event.currentTarget.form;
+            const email = fieldText(new FormData(form!), 'email');
+            if (!email || !auth) {
+              setError('Escribe tu correo para recuperar tu contraseña');
+              return;
+            }
+            try {
+              await sendPasswordResetEmail(auth, email);
+              setError(
+                'Si existe una cuenta con ese correo, recibirás instrucciones.',
+              );
+            } catch {
+              setError(
+                'No pudimos enviar las instrucciones. Revisa el correo.',
+              );
+            }
+          }}
+        >
+          Olvidé mi contraseña
         </button>
         <p className="mt-6 text-center text-xs text-[#68756e]">
           {registering ? '¿Ya tienes cuenta?' : '¿Aún no tienes cuenta?'}{' '}
@@ -1838,6 +2309,7 @@ function VehicleCatalogFields({
 }
 
 function OnboardingForm({
+  onRecover,
   profile,
   firstVehicle,
   onClose,
@@ -1845,8 +2317,9 @@ function OnboardingForm({
 }: {
   profile: Profile | null;
   firstVehicle?: Vehicle;
+  onRecover: () => void;
   onClose: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (event: SubmitEvent<HTMLFormElement>) => void;
 }) {
   return (
     <Modal locked={!profile} onClose={onClose}>
@@ -1861,8 +2334,8 @@ function OnboardingForm({
               {profile ? 'Editar datos principales' : 'Configura tu ReadyCar'}
             </h2>
             <p className="mt-2 text-sm leading-6 text-[#68756e]">
-              Tu perfil y vehículo quedan en este navegador; tus documentos se
-              sincronizan de forma privada con tu cuenta.
+              Tu perfil, vehículos y documentos se sincronizan de forma privada
+              con tu cuenta.
             </p>
           </div>
           {profile && (
@@ -1871,6 +2344,15 @@ function OnboardingForm({
             </button>
           )}
         </div>
+        {!profile && (
+          <button
+            type="button"
+            onClick={onRecover}
+            className="mt-4 text-sm underline"
+          >
+            Ya usaba ReadyCar: recuperar mi garaje anterior
+          </button>
+        )}
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
           <label className="field sm:col-span-2">
             Tu nombre
@@ -1881,39 +2363,43 @@ function OnboardingForm({
               placeholder="Ej. Catalina Rojas"
             />
           </label>
-          <label className="field">
-            Nombre del vehículo
-            <input
-              name="nickname"
-              required
-              defaultValue={firstVehicle?.nickname || 'Mi vehículo'}
-            />
-          </label>
-          <label className="field">
-            Patente
-            <input
-              name="plate"
-              required
-              defaultValue={firstVehicle?.plate}
-              placeholder="ABCD-12"
-            />
-          </label>
-          <VehicleCatalogFields
-            initialType={firstVehicle?.vehicleType}
-            initialBrand={firstVehicle?.brand}
-            initialModel={firstVehicle?.model}
-          />
-          <label className="field sm:col-span-2">
-            Año
-            <input
-              name="year"
-              required
-              type="number"
-              min="1950"
-              max="2030"
-              defaultValue={firstVehicle?.year || new Date().getFullYear()}
-            />
-          </label>
+          {!profile && (
+            <>
+              <label className="field">
+                Nombre del vehículo
+                <input
+                  name="nickname"
+                  required
+                  defaultValue={firstVehicle?.nickname || 'Mi vehículo'}
+                />
+              </label>
+              <label className="field">
+                Patente
+                <input
+                  name="plate"
+                  required
+                  defaultValue={firstVehicle?.plate}
+                  placeholder="ABCD-12"
+                />
+              </label>
+              <VehicleCatalogFields
+                initialType={firstVehicle?.vehicleType}
+                initialBrand={firstVehicle?.brand}
+                initialModel={firstVehicle?.model}
+              />
+              <label className="field sm:col-span-2">
+                Año
+                <input
+                  name="year"
+                  required
+                  type="number"
+                  min="1950"
+                  max={new Date().getFullYear() + 1}
+                  defaultValue={firstVehicle?.year || new Date().getFullYear()}
+                />
+              </label>
+            </>
+          )}
         </div>
         <button className="mt-7 w-full rounded-xl bg-[#183f33] px-5 py-3 text-sm font-bold text-white">
           Guardar y continuar
@@ -1923,11 +2409,13 @@ function OnboardingForm({
   );
 }
 function VehicleForm({
+  vehicle,
   onClose,
   onSubmit,
 }: {
+  vehicle?: Vehicle | null;
   onClose: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (event: SubmitEvent<HTMLFormElement>) => void;
 }) {
   return (
     <Modal onClose={onClose}>
@@ -1937,28 +2425,42 @@ function VehicleForm({
       >
         <FormTitle
           eyebrow="Nuevo registro"
-          title="Agregar vehículo"
+          title={vehicle ? 'Editar vehículo' : 'Agregar vehículo'}
           onClose={onClose}
         />
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
           <label className="field">
             Nombre
-            <input name="nickname" required placeholder="Ej. Auto familiar" />
+            <input
+              name="nickname"
+              required
+              defaultValue={vehicle?.nickname}
+              placeholder="Ej. Auto familiar"
+            />
           </label>
           <label className="field">
             Patente
-            <input name="plate" required placeholder="ABCD-12" />
+            <input
+              name="plate"
+              required
+              defaultValue={vehicle?.plate}
+              placeholder="ABCD-12"
+            />
           </label>
-          <VehicleCatalogFields />
+          <VehicleCatalogFields
+            initialType={vehicle?.vehicleType}
+            initialBrand={vehicle?.brand}
+            initialModel={vehicle?.model}
+          />
           <label className="field sm:col-span-2">
             Año
             <input
               name="year"
               type="number"
               min="1950"
-              max="2030"
+              max={new Date().getFullYear() + 1}
               required
-              defaultValue={new Date().getFullYear()}
+              defaultValue={vehicle?.year || new Date().getFullYear()}
             />
           </label>
         </div>
@@ -1976,7 +2478,7 @@ function DocumentForm({
   vehicles: Vehicle[];
   document: VehicleDocument | null;
   onClose: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (event: SubmitEvent<HTMLFormElement>) => void;
 }) {
   return (
     <Modal onClose={onClose}>
@@ -1986,7 +2488,13 @@ function DocumentForm({
       >
         <FormTitle
           eyebrow={document ? 'Editar registro' : 'Nuevo registro'}
-          title={document ? 'Editar documento' : 'Agregar documento'}
+          title={
+            document?.previousId
+              ? 'Renovar documento'
+              : document
+                ? 'Editar documento'
+                : 'Agregar documento'
+          }
           onClose={onClose}
         />
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -2015,11 +2523,10 @@ function DocumentForm({
             </select>
           </label>
           <label className="field">
-            Vencimiento
+            Vencimiento (opcional)
             <input
               name="expirationDate"
               type="date"
-              required
               defaultValue={document?.expirationDate}
             />
           </label>

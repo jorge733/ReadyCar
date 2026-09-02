@@ -2,15 +2,10 @@ import { NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
 import webpush from 'web-push';
 
-function daysUntil(date: string) {
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-  return Math.ceil(
-    (new Date(`${date}T12:00:00Z`).getTime() - today.getTime()) / 86400000,
-  );
-}
+import { daysUntil } from '@/lib/expiry';
 export async function GET(request: Request) {
   if (
+    !process.env.CRON_SECRET ||
     request.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`
   )
     return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
@@ -24,8 +19,22 @@ export async function GET(request: Request) {
   const byUser = new Map<string, { urgent: number; overdue: number }>();
   for (const item of documents.docs) {
     const data = item.data();
+    if (data.archived) continue;
     const days = daysUntil(data.expirationDate);
-    if (days <= 45) {
+    if (!data.ownerId || !Number.isFinite(days)) continue;
+    const settings = await db
+      .doc(`users/${data.ownerId}/settings/account`)
+      .get();
+    const preferences = settings.data();
+    if (
+      preferences?.vehicles?.some(
+        (vehicle: { id: number; archived?: boolean }) =>
+          vehicle.id === data.vehicleId && vehicle.archived,
+      )
+    )
+      continue;
+    const alertDays = preferences?.alertDays || [45, 15, 5];
+    if (days <= Math.max(...alertDays)) {
       const current = byUser.get(data.ownerId) || { urgent: 0, overdue: 0 };
       current.urgent++;
       if (days < 0) current.overdue++;
@@ -40,11 +49,16 @@ export async function GET(request: Request) {
       body: counts.overdue
         ? `${counts.overdue} vencido(s) y ${counts.urgent - counts.overdue} próximo(s) a vencer.`
         : `${counts.urgent} documento(s) próximo(s) a vencer.`,
-      url: 'https://appreadycar.vercel.app/',
+      url: '/',
     });
     for (const token of tokens.docs) {
       try {
+        const stamp = new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'America/Santiago',
+        }).format(new Date());
+        if (token.data().lastSentDate === stamp) continue;
         await webpush.sendNotification(token.data().subscription, payload);
+        await token.ref.update({ lastSentDate: stamp });
         sent++;
       } catch (error) {
         if (

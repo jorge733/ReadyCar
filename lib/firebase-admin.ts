@@ -1,7 +1,7 @@
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 
-function adminApp() {
+export function adminApp() {
   if (getApps().length) return getApps()[0]!;
   const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(
     /\\n/g,

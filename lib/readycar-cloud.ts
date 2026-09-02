@@ -2,13 +2,11 @@ import type { User } from 'firebase/auth';
 import {
   Bytes,
   collection,
-  deleteDoc,
   doc,
   getDocs,
   onSnapshot,
   orderBy,
   query,
-  setDoc,
   writeBatch,
 } from 'firebase/firestore';
 import { firestore } from './firebase';
@@ -22,8 +20,11 @@ export type CloudDocument = {
   fileName?: string | null;
   fileSize?: number | null;
   fileType?: string | null;
+  fileVersion?: string | null;
   chunkCount?: number;
   notes?: string;
+  archived?: boolean;
+  previousId?: number;
 };
 
 export function watchDocuments(
@@ -47,6 +48,17 @@ export async function saveCloudDocument(
   file?: File | null,
 ) {
   if (!firestore) throw new Error('Firebase no está disponible');
+  if (
+    document.expirationDate &&
+    (!/^\d{4}-\d{2}-\d{2}$/.test(document.expirationDate) ||
+      !Number.isFinite(Date.parse(document.expirationDate)))
+  )
+    throw new Error('Fecha de vencimiento inválida');
+  if (!document.name.trim() || !Number.isFinite(document.vehicleId))
+    throw new Error('Revisa el nombre y el vehículo');
+  const batch = writeBatch(firestore);
+  let fileVersion = document.fileVersion || null;
+  let oldChunks: Awaited<ReturnType<typeof getDocs>> | null = null;
   let fileName = document.fileName || null;
   let fileSize = document.fileSize || null;
   let fileType = document.fileType || null;
@@ -54,7 +66,7 @@ export async function saveCloudDocument(
   if (file?.size) {
     if (file.size > 10 * 1024 * 1024)
       throw new Error('El archivo supera los 10 MB');
-    const oldChunks = await getDocs(
+    oldChunks = await getDocs(
       collection(
         firestore,
         'users',
@@ -64,19 +76,28 @@ export async function saveCloudDocument(
         'chunks',
       ),
     );
-    const cleanup = writeBatch(firestore);
-    oldChunks.forEach((item) => cleanup.delete(item.ref));
-    await cleanup.commit();
+    if (
+      file.type !== 'application/pdf' &&
+      ![
+        'image/jpeg',
+        'image/png',
+        'image/webp',
+        'image/heic',
+        'image/heif',
+      ].includes(file.type)
+    )
+      throw new Error('Usa un PDF o imagen JPG, PNG, WEBP o HEIC');
     const bytes = new Uint8Array(await file.arrayBuffer());
     const chunkSize = 700 * 1024;
     chunkCount = Math.ceil(bytes.length / chunkSize);
-    const batch = writeBatch(firestore);
+    fileVersion = crypto.randomUUID();
+    let upload = writeBatch(firestore);
     for (let index = 0; index < chunkCount; index++) {
       const value = bytes.slice(
         index * chunkSize,
         Math.min(bytes.length, (index + 1) * chunkSize),
       );
-      batch.set(
+      upload.set(
         doc(
           firestore,
           'users',
@@ -84,12 +105,15 @@ export async function saveCloudDocument(
           'documents',
           String(document.id),
           'chunks',
-          String(index).padStart(3, '0'),
+          fileVersion + '-' + String(index).padStart(3, '0'),
         ),
-        { index, value: Bytes.fromUint8Array(value) },
+        { index, version: fileVersion, value: Bytes.fromUint8Array(value) },
       );
+      if ((index + 1) % 4 === 0 || index === chunkCount - 1) {
+        await upload.commit();
+        upload = writeBatch(firestore);
+      }
     }
-    await batch.commit();
     fileName = file.name;
     fileSize = file.size;
     fileType = file.type || 'application/octet-stream';
@@ -98,15 +122,40 @@ export async function saveCloudDocument(
     ...document,
     ownerId: user.uid,
     fileName,
+    fileVersion,
     fileSize,
     fileType,
     chunkCount,
     updatedAt: new Date().toISOString(),
   };
-  await setDoc(
+  batch.set(
     doc(firestore, 'users', user.uid, 'documents', String(document.id)),
     saved,
   );
+  if (document.previousId && !document.chunkCount)
+    batch.update(
+      doc(
+        firestore,
+        'users',
+        user.uid,
+        'documents',
+        String(document.previousId),
+      ),
+      { archived: true },
+    );
+  await batch.commit();
+  if (oldChunks && !oldChunks.empty) {
+    // Remove only chunks of the previously visible version; interrupted uploads can be retried safely.
+    const cleanup = writeBatch(firestore);
+    oldChunks.docs
+      .filter(
+        (item) =>
+          ((item.data() as { version?: string }).version || null) ===
+          (document.fileVersion || null),
+      )
+      .forEach((item) => cleanup.delete(item.ref));
+    await cleanup.commit().catch(() => undefined);
+  }
   return saved as CloudDocument;
 }
 
@@ -127,10 +176,10 @@ export async function deleteCloudDocument(
   );
   const batch = writeBatch(firestore);
   chunks.forEach((item) => batch.delete(item.ref));
-  await batch.commit();
-  await deleteDoc(
+  batch.delete(
     doc(firestore, 'users', userId, 'documents', String(document.id)),
   );
+  await batch.commit();
 }
 
 export async function getCloudDocumentBlob(
@@ -151,7 +200,12 @@ export async function getCloudDocumentBlob(
       orderBy('index'),
     ),
   );
-  const parts = chunks.docs.map((item) => {
+  const selectedChunks = chunks.docs.filter(
+    (item) => (item.data().version || null) === (document.fileVersion || null),
+  );
+  if (selectedChunks.length !== document.chunkCount)
+    throw new Error('Archivo incompleto. Intenta nuevamente.');
+  const parts = selectedChunks.map((item) => {
     const value = (item.data().value as Bytes).toUint8Array();
     return value.buffer.slice(
       value.byteOffset,
