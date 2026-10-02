@@ -12,7 +12,8 @@ Gestión personal de vehículos, documentos y vencimientos. Sitio: https://appre
 - Acciones directas por vehículo, búsqueda sin distinción de tildes en documentos y notas, y orden por vencimiento, nombre o registro reciente.
 - Vencimiento opcional, notas, búsqueda, filtros por vehículo y estado e historial de renovaciones.
 - Alertas calculadas con fecha de Chile, preferencias de anticipación y avisos diarios del navegador.
-- Exportación de respaldo JSON con archivos, importación como copias y exportación de calendario ICS.
+- Exportación de respaldo JSON con archivos, importación como copias y exportación de calendario ICS con patente del vehículo y recordatorios según la anticipación configurada.
+- Navegación inferior en móvil, estado de cada vehículo (al día, requiere atención, vencidos) y avisos de error diferenciados.
 - Enlace NFC fijo al dominio publicado, presentación móvil, manifiesto de instalación y pantalla sin conexión. Los documentos requieren conexión y sesión; no hay una ficha pública anónima.
 
 ## Desarrollo

@@ -14,6 +14,7 @@ import {
   Bell,
   Bike,
   CalendarClock,
+  CalendarPlus,
   CarFront,
   CheckCircle2,
   ChevronDown,
@@ -92,6 +93,24 @@ function statusFor(date: string, alertDays: number[]) {
   return { label: 'Vigente', tone: 'green' };
 }
 
+const basicDocumentTypes = [
+  'Permiso de circulación',
+  'Revisión técnica',
+  'SOAP',
+  'Padrón',
+];
+
+function vehicleHealth(documents: VehicleDocument[], alertDays: number[]) {
+  if (!documents.length) return { label: 'Sin documentos', tone: 'yellow' };
+  const soonest = Math.min(
+    ...documents.map((document) => daysUntil(document.expirationDate)),
+  );
+  if (soonest < 0) return { label: 'Con documentos vencidos', tone: 'red' };
+  if (soonest <= Math.max(...alertDays))
+    return { label: 'Requiere atención', tone: 'orange' };
+  return { label: 'Al día', tone: 'green' };
+}
+
 function vapidKey(value: string) {
   const padded = `${value}${'='.repeat((4 - (value.length % 4)) % 4)}`
     .replace(/-/g, '+')
@@ -126,7 +145,11 @@ export default function Home() {
   const [previewDocument, setPreviewDocument] =
     useState<VehicleDocument | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
-  const [toast, setToast] = useState('');
+  const [toast, setToast] = useState<{
+    message: string;
+    tone: 'success' | 'error';
+  } | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [showAuth, setShowAuth] = useState(false);
@@ -163,7 +186,7 @@ export default function Home() {
         setShowOnboarding(!account);
       },
       () =>
-        notify('No pudimos cargar tu garaje. Recarga para volver a intentar.'),
+        fail('No pudimos cargar tu garaje. Recarga para volver a intentar.'),
     );
   }, [user]);
 
@@ -173,9 +196,18 @@ export default function Home() {
       return;
     }
     return watchDocuments(user.uid, setDocuments, () =>
-      notify('No pudimos sincronizar tus documentos'),
+      fail('No pudimos sincronizar tus documentos'),
     );
   }, [user]);
+
+  useEffect(() => {
+    if (!mobileNav) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileNav(false);
+    };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [mobileNav]);
 
   useEffect(() => {
     if (!auth) {
@@ -190,9 +222,18 @@ export default function Home() {
     });
   }, []);
 
-  function notify(message: string) {
-    setToast(message);
-    window.setTimeout(() => setToast(''), 3200);
+  function notify(message: string, tone: 'success' | 'error' = 'success') {
+    window.clearTimeout(toastTimer.current);
+    setToast({ message, tone });
+    toastTimer.current = window.setTimeout(() => setToast(null), 3600);
+  }
+  function fail(message: string) {
+    notify(message, 'error');
+  }
+  function navigate(next: View) {
+    setMobileNav(false);
+    setView(next);
+    window.scrollTo({ top: 0 });
   }
   function vehicleFor(id: number) {
     return vehicles.find((vehicle) => vehicle.id === id);
@@ -241,16 +282,19 @@ export default function Home() {
       sortOrder,
     ],
   );
-  const expiring = documents.filter(
+  const activeDocuments = documents.filter(
     (document) =>
       !vehicles.some(
         (vehicle) => vehicle.id === document.vehicleId && vehicle.archived,
-      ) && daysUntil(document.expirationDate) <= Math.max(...alertDays),
+      ),
+  );
+  const expiring = activeDocuments.filter(
+    (document) => daysUntil(document.expirationDate) <= Math.max(...alertDays),
   ).length;
-  const overdue = documents.filter(
+  const overdue = activeDocuments.filter(
     (document) => daysUntil(document.expirationDate) < 0,
   ).length;
-  const current = documents.length - overdue;
+  const current = activeDocuments.length - overdue;
   const initials =
     profile?.name
       .split(' ')
@@ -285,7 +329,7 @@ export default function Home() {
       setShowOnboarding(false);
       notify('Perfil guardado en tu cuenta');
     } catch {
-      notify('No pudimos guardar el perfil. Inténtalo nuevamente.');
+      fail('No pudimos guardar el perfil. Inténtalo nuevamente.');
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -333,7 +377,7 @@ export default function Home() {
       setEditingVehicle(null);
       notify('Vehículo guardado');
     } catch (error) {
-      notify(
+      fail(
         error instanceof Error
           ? error.message
           : 'No pudimos guardar el vehículo',
@@ -388,7 +432,7 @@ export default function Home() {
           : 'Documento subido y guardado',
       );
     } catch (error) {
-      notify(
+      fail(
         error instanceof Error
           ? error.message
           : 'No pudimos subir el documento',
@@ -410,7 +454,7 @@ export default function Home() {
       await deleteCloudDocument(user.uid, document);
       notify('Documento eliminado');
     } catch {
-      notify('No pudimos eliminar el documento. Inténtalo de nuevo.');
+      fail('No pudimos eliminar el documento. Inténtalo de nuevo.');
     }
   }
   async function updateAlerts(days: number) {
@@ -425,19 +469,19 @@ export default function Home() {
         alertDays: next,
       }));
     } catch {
-      notify('No pudimos guardar tus preferencias');
+      fail('No pudimos guardar tus preferencias');
     }
   }
   async function toggleNotifications() {
     try {
       if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-        notify(
+        fail(
           'Este navegador no admite avisos. Puedes consultar tus alertas aquí.',
         );
         return;
       }
       if (!('Notification' in window)) {
-        notify('Este navegador no admite notificaciones');
+        fail('Este navegador no admite notificaciones');
         return;
       }
       if (!user) {
@@ -490,7 +534,7 @@ export default function Home() {
         : null;
       const enabled = Boolean(subscription && response?.ok);
       setNotificationsEnabled(enabled);
-      localStorage.setItem(notificationsKey, String(enabled));
+      localStorage.setItem(notificationsKey + user.uid, String(enabled));
       if (enabled) {
         await registration.showNotification('ReadyCar está listo', {
           body: 'Te avisaremos aunque la aplicación esté cerrada.',
@@ -498,12 +542,120 @@ export default function Home() {
         });
         notify('Notificaciones automáticas activadas');
       } else
-        notify(
+        fail(
           'No se pudieron activar los avisos. Revisa los permisos o inténtalo más tarde.',
         );
     } catch {
-      notify('No pudimos cambiar las notificaciones. Inténtalo nuevamente.');
+      fail('No pudimos cambiar las notificaciones. Inténtalo nuevamente.');
     }
+  }
+  async function exportBackup() {
+    if (!user || savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      const files = [];
+      for (const item of allDocuments) {
+        const blob = await getCloudDocumentBlob(user.uid, item);
+        const bytes = blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+        let binary = '';
+        if (bytes)
+          for (const byte of bytes) binary += String.fromCharCode(byte);
+        files.push({
+          ...item,
+          fileBase64: bytes ? btoa(binary) : null,
+        });
+      }
+      const url = URL.createObjectURL(
+        new Blob(
+          [
+            JSON.stringify({
+              version: 1,
+              exportedAt: new Date().toISOString(),
+              profile,
+              vehicles,
+              alertDays,
+              documents: files,
+            }),
+          ],
+          { type: 'application/json' },
+        ),
+      );
+      const link = window.document.createElement('a');
+      link.href = url;
+      link.download = 'readycar-respaldo.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      notify('Respaldo descargado');
+    } catch {
+      fail('No pudimos completar el respaldo');
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  }
+  function exportCalendar() {
+    const dated = documents.filter((item) => item.expirationDate);
+    if (!dated.length) {
+      fail('Agrega fechas de vencimiento para exportar el calendario');
+      return;
+    }
+    const escape = (value: string) =>
+      value
+        .replace(/\\/g, '\\\\')
+        .replace(/\n/g, '\\n')
+        .replace(/,/g, '\\,')
+        .replace(/;/g, '\\;');
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:]/g, '')
+      .replace(/\.\d{3}/, '');
+    const lines = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//ReadyCar//Vencimientos//ES',
+      'CALSCALE:GREGORIAN',
+      'X-WR-CALNAME:ReadyCar · Vencimientos',
+      ...dated.flatMap((item) => {
+        const vehicle = vehicleFor(item.vehicleId);
+        const label = vehicle ? ` · ${vehicle.plate}` : '';
+        return [
+          'BEGIN:VEVENT',
+          'UID:' + item.id + '@readycar',
+          'DTSTAMP:' + stamp,
+          'DTSTART;VALUE=DATE:' + item.expirationDate.replace(/-/g, ''),
+          'SUMMARY:' + escape(`Vence ${item.name}${label}`),
+          'DESCRIPTION:' +
+            escape(
+              [
+                item.type,
+                vehicle && `${vehicle.brand} ${vehicle.model}`,
+                item.notes,
+              ]
+                .filter(Boolean)
+                .join('\n'),
+            ),
+          ...alertDays.flatMap((days) => [
+            'BEGIN:VALARM',
+            'ACTION:DISPLAY',
+            'DESCRIPTION:' + escape(`${item.name} vence en ${days} días`),
+            `TRIGGER:-P${days}D`,
+            'END:VALARM',
+          ]),
+          'END:VEVENT',
+        ];
+      }),
+      'END:VCALENDAR',
+    ];
+    const url = URL.createObjectURL(
+      new Blob([lines.join('\r\n')], { type: 'text/calendar' }),
+    );
+    const a = window.document.createElement('a');
+    a.href = url;
+    a.download = 'readycar-vencimientos.ics';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    notify(`Calendario exportado con ${dated.length} vencimiento(s)`);
   }
   async function logout() {
     setVehicles([]);
@@ -520,12 +672,19 @@ export default function Home() {
       {saving && (
         <div
           role="status"
-          className="fixed bottom-5 left-5 z-[60] rounded-xl bg-[#183f33] p-4 text-sm text-white"
+          className="fixed bottom-24 left-4 z-[60] flex items-center gap-2 rounded-xl bg-[#183f33] px-4 py-3 text-sm font-semibold text-white shadow-xl lg:bottom-5 lg:left-5"
         >
+          <span className="size-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
           Guardando…
         </div>
       )}
-      <header className="sticky top-0 z-30 flex h-20 items-center justify-between border-b border-[#dfe1dc] bg-[#f8f7f3]/95 px-5 backdrop-blur md:px-9">
+      <a
+        href="#contenido"
+        className="sr-only z-[70] rounded-xl bg-[#183f33] px-4 py-3 text-sm font-bold text-white focus:not-sr-only focus:fixed focus:left-4 focus:top-4"
+      >
+        Saltar al contenido
+      </a>
+      <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-[#dfe1dc] bg-[#f8f7f3]/95 px-4 backdrop-blur sm:h-20 sm:px-5 md:px-9">
         <div className="flex items-center gap-3">
           <button
             aria-label="Abrir menú"
@@ -538,12 +697,13 @@ export default function Home() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => {
-              setMobileNav(false);
-              setView('alerts');
-            }}
+            onClick={() => navigate('alerts')}
             className="relative grid size-10 place-items-center rounded-xl border border-[#d9ddd7] bg-white text-[#526159]"
-            aria-label="Alertas"
+            aria-label={
+              expiring
+                ? `Alertas: ${expiring} documento(s) requieren atención`
+                : 'Alertas'
+            }
           >
             <Bell size={19} />
             {expiring > 0 && (
@@ -584,8 +744,15 @@ export default function Home() {
       </header>
 
       <div className="mx-auto flex max-w-[1500px]">
+        {mobileNav && (
+          <div
+            aria-hidden="true"
+            className="fixed inset-0 z-40 bg-[#10251d]/40 backdrop-blur-[2px] lg:hidden"
+            onClick={() => setMobileNav(false)}
+          />
+        )}
         <aside
-          className={`${mobileNav ? 'fixed inset-0 z-40 flex' : 'hidden'} w-64 shrink-0 flex-col border-r border-[#dfe1dc] bg-[#f4f3ef] p-5 lg:sticky lg:top-20 lg:flex lg:h-[calc(100vh-80px)]`}
+          className={`${mobileNav ? 'fixed inset-y-0 left-0 z-50 flex shadow-2xl' : 'hidden'} w-72 max-w-[85vw] shrink-0 flex-col overflow-y-auto border-r border-[#dfe1dc] bg-[#f4f3ef] p-5 lg:sticky lg:top-20 lg:flex lg:h-[calc(100vh-80px)] lg:w-64 lg:shadow-none`}
         >
           <button
             aria-label="Cerrar menú"
@@ -599,40 +766,28 @@ export default function Home() {
               active={view === 'summary'}
               icon={<Gauge size={18} />}
               label="Resumen"
-              onClick={() => {
-                setMobileNav(false);
-                setView('summary');
-              }}
+              onClick={() => navigate('summary')}
             />
             <NavButton
               active={view === 'documents'}
               icon={<FileText size={18} />}
               label="Documentos"
               count={documents.length}
-              onClick={() => {
-                setMobileNav(false);
-                setView('documents');
-              }}
+              onClick={() => navigate('documents')}
             />
             <NavButton
               active={view === 'vehicles'}
               icon={<CarFront size={18} />}
               label="Vehículos"
               count={vehicles.length}
-              onClick={() => {
-                setMobileNav(false);
-                setView('vehicles');
-              }}
+              onClick={() => navigate('vehicles')}
             />
             <NavButton
               active={view === 'alerts'}
               icon={<Bell size={18} />}
               label="Alertas"
               count={expiring}
-              onClick={() => {
-                setMobileNav(false);
-                setView('alerts');
-              }}
+              onClick={() => navigate('alerts')}
             />
           </nav>
           <div className="mt-auto rounded-2xl border border-[#dce2dc] bg-[#eaf0eb] p-4">
@@ -646,17 +801,31 @@ export default function Home() {
             </p>
           </div>
           <button
-            onClick={() => setShowOnboarding(true)}
-            className="mt-4 flex items-center gap-3 px-4 py-3 text-sm text-[#66736b]"
+            onClick={() => {
+              setMobileNav(false);
+              setShowOnboarding(true);
+            }}
+            className="mt-4 flex items-center gap-3 rounded-xl px-4 py-3 text-sm text-[#66736b] hover:bg-white"
           >
             <Settings size={18} />
             Editar perfil
           </button>
         </aside>
 
-        <section className="min-w-0 flex-1 px-5 py-8 md:px-10 md:py-10">
+        <section
+          id="contenido"
+          className="min-w-0 flex-1 px-4 pb-28 pt-6 sm:px-5 sm:pt-8 md:px-10 md:py-10 lg:pb-10"
+        >
           <div className="mx-auto max-w-6xl">
-            {user && !accountReady && <p role="status">Cargando tu garaje…</p>}
+            {user && !accountReady && (
+              <div
+                role="status"
+                className="mb-6 flex items-center gap-3 rounded-2xl border border-[#dfe1dc] bg-white p-4 text-sm font-semibold text-[#536159]"
+              >
+                <span className="size-4 animate-spin rounded-full border-2 border-[#cfd8d2] border-t-[#183f33]" />
+                Cargando tu garaje…
+              </div>
+            )}
             {view === 'summary' && (
               <Summary
                 profile={profile}
@@ -671,124 +840,24 @@ export default function Home() {
                     ? setShowDocumentForm(true)
                     : setShowVehicleForm(true)
                 }
-                onViewDocuments={() => setView('documents')}
+                onViewDocuments={() => navigate('documents')}
+                onViewVehicles={() => navigate('vehicles')}
+                onOpenVehicle={(vehicle) => {
+                  setVehicleFilter(vehicle.id);
+                  setStatusFilter('all');
+                  setQuery('');
+                  navigate('documents');
+                }}
+                onPreview={setPreviewDocument}
                 vehicleFor={vehicleFor}
               />
             )}
             {view === 'documents' && (
-              <div className="mb-4 flex flex-wrap gap-3">
-                <select
-                  aria-label="Filtrar por estado"
-                  className="rounded-xl border p-3"
-                  value={statusFilter}
-                  onChange={(event) => setStatusFilter(event.target.value)}
-                >
-                  <option value="all">Todos los estados</option>
-                  <option value="current">Vigentes</option>
-                  <option value="soon">Próximos a vencer</option>
-                  <option value="overdue">Vencidos</option>
-                  <option value="history">Historial de renovaciones</option>
-                </select>
-                <button
-                  className="rounded-xl border px-4"
-                  onClick={async () => {
-                    if (!user || savingRef.current) return;
-                    savingRef.current = true;
-                    setSaving(true);
-                    try {
-                      const files = [];
-                      for (const item of allDocuments) {
-                        const blob = await getCloudDocumentBlob(user.uid, item);
-                        const bytes = blob
-                          ? new Uint8Array(await blob.arrayBuffer())
-                          : null;
-                        let binary = '';
-                        if (bytes)
-                          for (const byte of bytes)
-                            binary += String.fromCharCode(byte);
-                        files.push({
-                          ...item,
-                          fileBase64: bytes ? btoa(binary) : null,
-                        });
-                      }
-                      const url = URL.createObjectURL(
-                        new Blob(
-                          [
-                            JSON.stringify({
-                              version: 1,
-                              exportedAt: new Date().toISOString(),
-                              profile,
-                              vehicles,
-                              alertDays,
-                              documents: files,
-                            }),
-                          ],
-                          { type: 'application/json' },
-                        ),
-                      );
-                      const link = window.document.createElement('a');
-                      link.href = url;
-                      link.download = 'readycar-respaldo.json';
-                      link.click();
-                      setTimeout(() => URL.revokeObjectURL(url), 1000);
-                      notify('Respaldo descargado');
-                    } catch {
-                      notify('No pudimos completar el respaldo');
-                    } finally {
-                      savingRef.current = false;
-                      setSaving(false);
-                    }
-                  }}
-                >
-                  Descargar respaldo con archivos
-                </button>
-                <button
-                  className="rounded-xl border px-4 py-3"
-                  onClick={() => {
-                    const escape = (value: string) =>
-                      value
-                        .replace(/\\/g, '\\\\')
-                        .replace(/\n/g, '\\n')
-                        .replace(/,/g, '\\,')
-                        .replace(/;/g, '\\;');
-                    const lines = [
-                      'BEGIN:VCALENDAR',
-                      'VERSION:2.0',
-                      'PRODID:-//ReadyCar//Vencimientos//ES',
-                      ...documents
-                        .filter((item) => item.expirationDate)
-                        .flatMap((item) => [
-                          'BEGIN:VEVENT',
-                          'UID:' + item.id + '@readycar',
-                          'DTSTAMP:' +
-                            new Date()
-                              .toISOString()
-                              .replace(/[-:]/g, '')
-                              .replace(/\.\d{3}/, ''),
-                          'DTSTART;VALUE=DATE:' +
-                            item.expirationDate.replace(/-/g, ''),
-                          'SUMMARY:' + escape(item.name),
-                          'DESCRIPTION:' + escape(item.notes || ''),
-                          'END:VEVENT',
-                        ]),
-                      'END:VCALENDAR',
-                    ];
-                    const url = URL.createObjectURL(
-                      new Blob([lines.join('\r\n')], { type: 'text/calendar' }),
-                    );
-                    const a = window.document.createElement('a');
-                    a.href = url;
-                    a.download = 'readycar-vencimientos.ics';
-                    a.click();
-                    setTimeout(() => URL.revokeObjectURL(url), 1000);
-                  }}
-                >
-                  Exportar calendario
-                </button>
-              </div>
-            )}
-            {view === 'documents' && (
               <DocumentsView
+                statusFilter={statusFilter}
+                onStatusFilter={setStatusFilter}
+                onExportBackup={exportBackup}
+                onExportCalendar={exportCalendar}
                 sortOrder={sortOrder}
                 onSort={setSortOrder}
                 onReset={() => {
@@ -844,7 +913,7 @@ export default function Home() {
                   setVehicleFilter(vehicle.id);
                   setStatusFilter('all');
                   setQuery('');
-                  setView('documents');
+                  navigate('documents');
                 }}
                 onAddDocument={(vehicle) => {
                   setEditingDocument(null);
@@ -870,14 +939,14 @@ export default function Home() {
                       ),
                     }));
                   } catch {
-                    notify('No pudimos actualizar el vehículo');
+                    fail('No pudimos actualizar el vehículo');
                   }
                 }}
                 onDelete={async (vehicle) => {
                   if (
                     allDocuments.some((item) => item.vehicleId === vehicle.id)
                   ) {
-                    notify('Archiva el vehículo para conservar sus documentos');
+                    fail('Archiva el vehículo para conservar sus documentos');
                     return;
                   }
                   if (confirm('¿Eliminar este vehículo sin documentos?'))
@@ -889,7 +958,7 @@ export default function Home() {
                         ),
                       }));
                     } catch {
-                      notify('No pudimos eliminar el vehículo');
+                      fail('No pudimos eliminar el vehículo');
                     }
                 }}
               />
@@ -911,6 +980,38 @@ export default function Home() {
         </section>
       </div>
 
+      <nav
+        aria-label="Navegación principal"
+        className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-[#dfe1dc] bg-[#f8f7f3]/95 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur lg:hidden"
+      >
+        {(
+          [
+            ['summary', 'Resumen', Gauge, 0],
+            ['documents', 'Documentos', FileText, 0],
+            ['vehicles', 'Vehículos', CarFront, 0],
+            ['alerts', 'Alertas', Bell, expiring],
+          ] as const
+        ).map(([id, label, Icon, badge]) => (
+          <button
+            key={id}
+            onClick={() => navigate(id)}
+            aria-current={view === id ? 'page' : undefined}
+            className={`relative flex flex-col items-center gap-1 rounded-xl py-1.5 text-[11px] font-semibold ${view === id ? 'text-[#183f33]' : 'text-[#7a867f]'}`}
+          >
+            <span
+              className={`grid h-7 w-12 place-items-center rounded-full ${view === id ? 'bg-[#dfeae3]' : ''}`}
+            >
+              <Icon size={19} />
+            </span>
+            {label}
+            {badge > 0 && (
+              <span className="absolute left-1/2 top-0 ml-2 grid min-w-4 place-items-center rounded-full bg-[#ec703b] px-1 text-[9px] font-bold text-white">
+                {badge}
+              </span>
+            )}
+          </button>
+        ))}
+      </nav>
       {showOnboarding && (
         <OnboardingForm
           profile={profile}
@@ -931,7 +1032,7 @@ export default function Home() {
                     typeof item.plate !== 'string',
                 )
               ) {
-                notify('No encontramos un garaje anterior válido');
+                fail('No encontramos un garaje anterior válido');
                 return;
               }
               if (
@@ -956,7 +1057,7 @@ export default function Home() {
               setShowOnboarding(false);
               notify('Garaje anterior recuperado');
             } catch {
-              notify('No pudimos recuperar el garaje anterior');
+              fail('No pudimos recuperar el garaje anterior');
             }
           }}
           onSubmit={completeOnboarding}
@@ -1005,11 +1106,23 @@ export default function Home() {
       )}
       {toast && (
         <div
-          role="status"
-          className="fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-xl bg-[#183f33] px-4 py-3 text-sm font-semibold text-white shadow-xl"
+          role={toast.tone === 'error' ? 'alert' : 'status'}
+          className={`fixed inset-x-4 bottom-24 z-[60] flex items-start gap-2 rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-xl sm:inset-x-auto sm:right-5 sm:max-w-sm lg:bottom-5 ${toast.tone === 'error' ? 'bg-[#a8432f]' : 'bg-[#183f33]'}`}
         >
-          <CheckCircle2 size={18} />
-          {toast}
+          {toast.tone === 'error' ? (
+            <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+          ) : (
+            <CheckCircle2 size={18} className="mt-0.5 shrink-0" />
+          )}
+          <span className="flex-1">{toast.message}</span>
+          <button
+            type="button"
+            aria-label="Cerrar aviso"
+            onClick={() => setToast(null)}
+            className="-m-1 rounded-lg p-1 hover:bg-white/10"
+          >
+            <X size={16} />
+          </button>
         </div>
       )}
     </main>
@@ -1026,7 +1139,7 @@ function Brand() {
         <p className="text-lg font-bold leading-none tracking-[-.03em]">
           ReadyCar
         </p>
-        <p className="mt-1 text-[10px] font-semibold uppercase tracking-[.18em] text-[#718078]">
+        <p className="mt-1 hidden text-[10px] font-semibold uppercase tracking-[.18em] text-[#718078] sm:block">
           Documentos al día
         </p>
       </div>
@@ -1074,6 +1187,9 @@ function Summary({
   overdue,
   onAddDocument,
   onViewDocuments,
+  onViewVehicles,
+  onOpenVehicle,
+  onPreview,
   vehicleFor,
 }: {
   profile: Profile | null;
@@ -1085,6 +1201,9 @@ function Summary({
   overdue: number;
   onAddDocument: () => void;
   onViewDocuments: () => void;
+  onViewVehicles: () => void;
+  onOpenVehicle: (vehicle: Vehicle) => void;
+  onPreview: (document: VehicleDocument) => void;
   vehicleFor: (id: number) => Vehicle | undefined;
 }) {
   const urgent = documents
@@ -1098,8 +1217,9 @@ function Summary({
       (document) =>
         daysUntil(document.expirationDate) <= Math.max(...alertDays),
     )
-    .sort((a, b) => a.expirationDate.localeCompare(b.expirationDate))
-    .slice(0, 4);
+    .sort((a, b) => compareExpiration(a.expirationDate, b.expirationDate))
+    .slice(0, 5);
+  const activeVehicles = vehicles.filter((vehicle) => !vehicle.archived);
   return (
     <>
       <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
@@ -1122,7 +1242,7 @@ function Summary({
           Agregar documento
         </button>
       </div>
-      <div className="mt-8 grid gap-4 md:grid-cols-3">
+      <div className="mt-6 grid grid-cols-3 gap-2 sm:mt-8 sm:gap-4">
         <Stat
           icon={<FileCheck2 />}
           value={current}
@@ -1167,11 +1287,17 @@ function Summary({
                 const vehicle = vehicleFor(document.vehicleId);
                 const status = statusFor(document.expirationDate, alertDays);
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={document.id}
-                    className="flex items-center gap-4 p-5"
+                    onClick={() =>
+                      document.chunkCount
+                        ? onPreview(document)
+                        : onViewDocuments()
+                    }
+                    className="flex w-full items-center gap-4 p-4 text-left hover:bg-[#fafaf7] sm:p-5"
                   >
-                    <div className="grid size-10 place-items-center rounded-xl bg-[#edf1ee] text-[#315b4c]">
+                    <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-[#edf1ee] text-[#315b4c]">
                       <FileText size={18} />
                     </div>
                     <div className="min-w-0 flex-1">
@@ -1184,7 +1310,7 @@ function Summary({
                           : 'Vehículo'}
                       </p>
                     </div>
-                    <div className="text-right">
+                    <div className="shrink-0 text-right">
                       <p className="text-xs font-semibold">
                         {formatExpiry(document.expirationDate)}
                       </p>
@@ -1194,7 +1320,7 @@ function Summary({
                         {status.label}
                       </span>
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -1213,30 +1339,64 @@ function Summary({
           )}
         </div>
         <div className="rounded-2xl bg-[#183f33] p-6 text-white">
-          <p className="text-xs font-bold uppercase tracking-[.14em] text-white/55">
-            Tu garaje
-          </p>
-          <p className="mt-3 text-4xl font-bold">{vehicles.length}</p>
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-xs font-bold uppercase tracking-[.14em] text-white/55">
+              Tu garaje
+            </p>
+            <button
+              onClick={onViewVehicles}
+              className="text-xs font-bold text-white/80 hover:text-white"
+            >
+              Administrar
+            </button>
+          </div>
+          <p className="mt-3 text-4xl font-bold">{activeVehicles.length}</p>
           <p className="mt-1 text-sm text-white/65">
-            {vehicles.length === 1
-              ? 'vehículo registrado'
-              : 'vehículos registrados'}
+            {activeVehicles.length === 1
+              ? 'vehículo activo'
+              : 'vehículos activos'}
           </p>
-          <div className="mt-7 space-y-3">
-            {vehicles.slice(0, 3).map((vehicle) => (
-              <div
-                key={vehicle.id}
-                className="flex items-center gap-3 rounded-xl bg-white/8 p-3"
+          <div className="mt-7 space-y-2">
+            {activeVehicles.slice(0, 4).map((vehicle) => {
+              const health = vehicleHealth(
+                documents.filter((item) => item.vehicleId === vehicle.id),
+                alertDays,
+              );
+              return (
+                <button
+                  key={vehicle.id}
+                  onClick={() => onOpenVehicle(vehicle)}
+                  className="flex w-full items-center gap-3 rounded-xl bg-white/8 p-3 text-left hover:bg-white/14"
+                >
+                  {vehicle.vehicleType === 'motorcycle' ? (
+                    <Bike size={18} className="shrink-0" />
+                  ) : (
+                    <CarFront size={18} className="shrink-0" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-bold">
+                      {vehicle.nickname}
+                    </p>
+                    <p className="truncate text-[10px] text-white/55">
+                      {vehicle.brand} {vehicle.model} · {vehicle.plate}
+                    </p>
+                  </div>
+                  <span
+                    title={health.label}
+                    aria-label={health.label}
+                    className={`size-2.5 shrink-0 rounded-full ${{ red: 'bg-[#ff8a70]', orange: 'bg-[#ffb07a]', yellow: 'bg-[#f3d36b]', green: 'bg-[#7fd6a0]' }[health.tone]}`}
+                  />
+                </button>
+              );
+            })}
+            {!activeVehicles.length && (
+              <button
+                onClick={onViewVehicles}
+                className="w-full rounded-xl border border-dashed border-white/25 p-3 text-xs font-bold text-white/80 hover:bg-white/8"
               >
-                <CarFront size={18} />
-                <div>
-                  <p className="text-xs font-bold">{vehicle.nickname}</p>
-                  <p className="text-[10px] text-white/55">
-                    {vehicle.brand} {vehicle.model} · {vehicle.plate}
-                  </p>
-                </div>
-              </div>
-            ))}
+                Agregar tu primer vehículo
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1263,20 +1423,30 @@ function Stat({
     red: 'bg-[#fdebe7] text-[#bd4632]',
   }[kind];
   return (
-    <div className="rounded-2xl border border-[#dfe1dc] bg-white p-5">
-      <div className="flex items-start justify-between">
-        <div className={`grid size-10 place-items-center rounded-xl ${colors}`}>
+    <div className="rounded-2xl border border-[#dfe1dc] bg-white p-3 sm:p-5">
+      <div className="flex items-start justify-between gap-2">
+        <div
+          className={`grid size-8 place-items-center rounded-xl sm:size-10 [&_svg]:size-4 sm:[&_svg]:size-6 ${colors}`}
+        >
           {icon}
         </div>
-        <span className="text-3xl font-bold">{value}</span>
+        <span className="text-2xl font-bold sm:text-3xl">{value}</span>
       </div>
-      <p className="mt-5 text-sm font-semibold">{title}</p>
-      <p className="mt-1 text-xs text-[#768179]">{description}</p>
+      <p className="mt-3 text-xs font-semibold leading-4 sm:mt-5 sm:text-sm">
+        {title}
+      </p>
+      <p className="mt-1 hidden text-xs text-[#768179] sm:block">
+        {description}
+      </p>
     </div>
   );
 }
 
 function DocumentsView({
+  statusFilter,
+  onStatusFilter,
+  onExportBackup,
+  onExportCalendar,
   sortOrder,
   onSort,
   onReset,
@@ -1294,6 +1464,10 @@ function DocumentsView({
   onRenew,
   onDelete,
 }: {
+  statusFilter: string;
+  onStatusFilter: (value: string) => void;
+  onExportBackup: () => void;
+  onExportCalendar: () => void;
   sortOrder: string;
   onSort: (value: string) => void;
   onReset: () => void;
@@ -1320,18 +1494,41 @@ function DocumentsView({
         action="Agregar documento"
         onAction={onAdd}
       />
-      <div className="mt-7 overflow-hidden rounded-2xl border border-[#dfe1dc] bg-white">
-        <div className="flex flex-col gap-3 border-b border-[#e6e7e3] p-5 sm:flex-row">
-          <label className="flex h-10 flex-1 items-center gap-2 rounded-xl border border-[#dfe1dc] bg-[#fafaf8] px-3 focus-within:border-[#4d7668]">
-            <Search size={16} className="text-[#879189]" />
+      <div className="mt-5 grid grid-cols-2 gap-2 sm:flex">
+        <button
+          type="button"
+          onClick={onExportCalendar}
+          className="flex h-10 items-center justify-center gap-2 rounded-xl border border-[#d9ddd7] bg-white px-4 text-xs font-bold text-[#285747] hover:bg-[#f4f6f3]"
+        >
+          <CalendarPlus size={16} className="shrink-0" />
+          <span className="sm:hidden">Calendario</span>
+          <span className="hidden sm:inline">Exportar calendario</span>
+        </button>
+        <button
+          type="button"
+          onClick={onExportBackup}
+          className="flex h-10 items-center justify-center gap-2 rounded-xl border border-[#d9ddd7] bg-white px-4 text-xs font-bold text-[#285747] hover:bg-[#f4f6f3]"
+        >
+          <Download size={16} className="shrink-0" />
+          <span className="sm:hidden">Respaldo</span>
+          <span className="hidden sm:inline">Descargar respaldo</span>
+        </button>
+      </div>
+      <div className="mt-5 overflow-hidden rounded-2xl border border-[#dfe1dc] bg-white">
+        <div className="grid grid-cols-2 gap-3 border-b border-[#e6e7e3] p-4 sm:p-5 md:grid-cols-[1fr_auto_auto]">
+          <label className="col-span-2 flex h-11 items-center gap-2 rounded-xl border border-[#dfe1dc] bg-[#fafaf8] px-3 focus-within:border-[#4d7668] md:col-span-1">
+            <Search size={16} className="shrink-0 text-[#879189]" />
             <input
+              type="search"
+              aria-label="Buscar documentos"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              className="w-full bg-transparent text-sm outline-none"
-              placeholder="Buscar documento, vehículo o notas"
+              className="w-full bg-transparent text-base outline-none sm:text-sm"
+              placeholder="Buscar documento o patente"
             />
           </label>
           <select
+            aria-label="Filtrar por vehículo"
             value={vehicleFilter}
             onChange={(event) =>
               setVehicleFilter(
@@ -1340,7 +1537,7 @@ function DocumentsView({
                   : Number(event.target.value),
               )
             }
-            className="h-10 rounded-xl border border-[#dfe1dc] bg-white px-3 text-sm"
+            className="h-11 min-w-0 rounded-xl border border-[#dfe1dc] bg-white px-3 text-sm"
           >
             <option value="all">Todos los vehículos</option>
             {vehicles.map((vehicle) => (
@@ -1349,12 +1546,9 @@ function DocumentsView({
               </option>
             ))}
           </select>
-        </div>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4 text-xs text-[#68756e]">
-          <span>{documents.length} documento(s)</span>
           <select
             aria-label="Orden de documentos"
-            className="rounded-xl border p-2"
+            className="h-11 min-w-0 rounded-xl border border-[#dfe1dc] bg-white px-3 text-sm"
             value={sortOrder}
             onChange={(event) => onSort(event.target.value)}
           >
@@ -1362,9 +1556,44 @@ function DocumentsView({
             <option value="name">Nombre A–Z</option>
             <option value="recent">Agregados recientemente</option>
           </select>
-          <button onClick={onReset} className="underline">
-            Limpiar filtros
-          </button>
+        </div>
+        <fieldset className="flex min-w-0 gap-2 overflow-x-auto border-b border-[#e6e7e3] px-4 py-3 sm:px-5">
+          <legend className="sr-only">Filtrar por estado</legend>
+          {[
+            ['all', 'Todos'],
+            ['current', 'Vigentes'],
+            ['soon', 'Por vencer'],
+            ['overdue', 'Vencidos'],
+            ['history', 'Historial'],
+          ].map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={statusFilter === value}
+              onClick={() => onStatusFilter(value)}
+              className={`h-9 shrink-0 rounded-full px-4 text-xs font-bold ${statusFilter === value ? 'bg-[#183f33] text-white' : 'bg-[#f0f2ee] text-[#536159] hover:bg-[#e5e9e4]'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </fieldset>
+        <div className="flex items-center justify-between gap-3 border-b border-[#e6e7e3] px-4 py-3 text-xs text-[#68756e] sm:px-5">
+          <span aria-live="polite">
+            {documents.length}{' '}
+            {documents.length === 1 ? 'documento' : 'documentos'}
+          </span>
+          {(query ||
+            vehicleFilter !== 'all' ||
+            statusFilter !== 'all' ||
+            sortOrder !== 'expiry') && (
+            <button
+              type="button"
+              onClick={onReset}
+              className="font-bold text-[#285747] underline"
+            >
+              Limpiar filtros
+            </button>
+          )}
         </div>
         {documents.length ? (
           <div className="divide-y divide-[#ecece8]">
@@ -1461,6 +1690,7 @@ function DocumentRow({
             onClick={onRenew}
             className="row-action"
             title="Renovar conservando el anterior"
+            aria-label="Renovar conservando el anterior"
           >
             <CalendarClock size={16} />
           </button>
@@ -1470,6 +1700,7 @@ function DocumentRow({
           disabled={!document.chunkCount}
           className="row-action"
           title="Ver documento"
+          aria-label="Ver documento"
         >
           <Eye size={16} />
         </button>
@@ -1478,16 +1709,23 @@ function DocumentRow({
           disabled={!document.chunkCount}
           className="row-action"
           title="Descargar"
+          aria-label="Descargar"
         >
           <Download size={16} />
         </button>
-        <button onClick={onEdit} className="row-action" title="Editar">
+        <button
+          onClick={onEdit}
+          className="row-action"
+          title="Editar"
+          aria-label="Editar"
+        >
           <Pencil size={16} />
         </button>
         <button
           onClick={onDelete}
           className="row-action text-[#a84938]"
           title="Eliminar"
+          aria-label="Eliminar"
         >
           <Trash2 size={16} />
         </button>
@@ -1631,27 +1869,80 @@ function VehiclesView({
       />
       <div className="mt-7 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {vehicles.map((vehicle) => {
-          const count = documents.filter(
+          const own = documents.filter(
             (document) => document.vehicleId === vehicle.id,
+          );
+          const attention = own.filter(
+            (document) =>
+              daysUntil(document.expirationDate) <= Math.max(...alertDays),
           ).length;
+          const missing = basicDocumentTypes.filter(
+            (type) => !own.some((item) => item.type === type),
+          );
+          const health = vehicleHealth(own, alertDays);
           return (
             <article
               key={vehicle.id}
-              className="rounded-2xl border border-[#dfe1dc] bg-white p-6"
+              className={`flex flex-col rounded-2xl border border-[#dfe1dc] bg-white p-5 sm:p-6 ${vehicle.archived ? 'opacity-75' : ''}`}
             >
-              <div className="flex items-start justify-between">
-                <div className="grid size-12 place-items-center rounded-xl bg-[#183f33] text-white">
-                  {vehicle.vehicleType === 'motorcycle' ? (
-                    <Bike />
-                  ) : (
-                    <CarFront />
-                  )}
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="grid size-12 shrink-0 place-items-center rounded-xl bg-[#183f33] text-white">
+                    {vehicle.vehicleType === 'motorcycle' ? (
+                      <Bike />
+                    ) : (
+                      <CarFront />
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-bold uppercase tracking-[.12em] text-[#7b867f]">
+                      {vehicle.nickname}
+                    </p>
+                    <h2 className="truncate text-lg font-bold">
+                      {vehicle.brand} {vehicle.model}
+                    </h2>
+                  </div>
                 </div>
-                <span className="rounded-lg bg-[#f0f1ed] px-2 py-1 text-[10px] font-bold text-[#657168]">
+                <span className="shrink-0 rounded-lg bg-[#f0f1ed] px-2 py-1 text-[10px] font-bold text-[#657168]">
                   {vehicle.year}
                 </span>
               </div>
-              <div className="mt-4 flex flex-wrap gap-2">
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <p className="inline-flex rounded-lg border border-[#d5ddd7] bg-[#f6f8f5] px-3 py-1 font-mono text-sm font-bold tracking-wider">
+                  {vehicle.plate}
+                </p>
+                {vehicle.archived ? (
+                  <span className="rounded-full bg-[#eceeea] px-2 py-1 text-[10px] font-bold text-[#5f6b64]">
+                    Archivado
+                  </span>
+                ) : (
+                  <span
+                    className={`rounded-full px-2 py-1 text-[10px] font-bold status-${health.tone}`}
+                  >
+                    {health.label}
+                  </span>
+                )}
+              </div>
+              <p className="mt-4 text-xs leading-5 text-[#68756e]">
+                {missing.length ? (
+                  <>
+                    <strong className="text-[#536159]">Sin registrar:</strong>{' '}
+                    {missing.join(', ')}
+                  </>
+                ) : (
+                  'Tienes las cuatro categorías básicas registradas'
+                )}
+              </p>
+              <div className="mt-4 flex items-center justify-between border-t border-[#ecece8] pt-4 text-xs text-[#6e7a73]">
+                <span>
+                  {own.length} {own.length === 1 ? 'documento' : 'documentos'}
+                </span>
+                <span>
+                  {attention} {attention === 1 ? 'requiere' : 'requieren'}{' '}
+                  atención
+                </span>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-2">
                 <button
                   className="rounded-xl bg-[#183f33] px-3 py-3 text-xs font-bold text-white"
                   onClick={() => onDocuments(vehicle)}
@@ -1660,63 +1951,33 @@ function VehiclesView({
                 </button>
                 {!vehicle.archived && (
                   <button
-                    className="rounded-xl border px-3 py-3 text-xs font-bold"
+                    className="flex items-center justify-center gap-1 rounded-xl border border-[#d9ddd7] px-3 py-3 text-xs font-bold text-[#285747] hover:bg-[#f4f6f3]"
                     onClick={() => onAddDocument(vehicle)}
                   >
-                    Agregar documento
+                    <Plus size={14} />
+                    Documento
                   </button>
                 )}
               </div>
-              <div className="mt-4 flex flex-wrap gap-3 text-xs">
-                <button onClick={() => onEdit(vehicle)}>Editar</button>
-                <button onClick={() => onArchive(vehicle)}>
+              <div className="mt-2 flex flex-wrap gap-1 text-xs font-semibold text-[#536159]">
+                <button
+                  className="rounded-lg px-2 py-2 hover:bg-[#f0f2ee]"
+                  onClick={() => onEdit(vehicle)}
+                >
+                  Editar
+                </button>
+                <button
+                  className="rounded-lg px-2 py-2 hover:bg-[#f0f2ee]"
+                  onClick={() => onArchive(vehicle)}
+                >
                   {vehicle.archived ? 'Restaurar' : 'Archivar'}
                 </button>
-                <button onClick={() => onDelete(vehicle)}>Eliminar</button>
-                {vehicle.archived && <strong>Archivado</strong>}
-              </div>
-              <p className="mt-6 text-xs font-bold uppercase tracking-[.12em] text-[#7b867f]">
-                {vehicle.nickname}
-              </p>
-              <h2 className="mt-1 text-xl font-bold">
-                {vehicle.brand} {vehicle.model}
-              </h2>
-              <p className="mt-2 inline-flex rounded-lg bg-[#edf1ee] px-3 py-1 font-mono text-sm font-bold tracking-wider">
-                {vehicle.plate}
-              </p>
-              <p className="mt-4 text-xs leading-5 text-[#68756e]">
-                Sin registrar:{' '}
-                {[
-                  'Permiso de circulación',
-                  'Revisión técnica',
-                  'SOAP',
-                  'Padrón',
-                ]
-                  .filter(
-                    (type) =>
-                      !documents.some(
-                        (item) =>
-                          item.vehicleId === vehicle.id && item.type === type,
-                      ),
-                  )
-                  .join(', ') ||
-                  'Tienes las cuatro categorías básicas registradas'}
-              </p>
-              <div className="mt-6 flex items-center justify-between border-t border-[#ecece8] pt-4 text-xs text-[#6e7a73]">
-                <span>
-                  {count} {count === 1 ? 'documento' : 'documentos'}
-                </span>
-                <span>
-                  {
-                    documents.filter(
-                      (document) =>
-                        document.vehicleId === vehicle.id &&
-                        daysUntil(document.expirationDate) <=
-                          Math.max(...alertDays),
-                    ).length
-                  }{' '}
-                  próximos
-                </span>
+                <button
+                  className="ml-auto rounded-lg px-2 py-2 text-[#a84938] hover:bg-[#fdebe7]"
+                  onClick={() => onDelete(vehicle)}
+                >
+                  Eliminar
+                </button>
               </div>
             </article>
           );
@@ -1763,7 +2024,7 @@ function AlertsView({
       (document) =>
         daysUntil(document.expirationDate) <= Math.max(...alertDays),
     )
-    .sort((a, b) => a.expirationDate.localeCompare(b.expirationDate));
+    .sort((a, b) => compareExpiration(a.expirationDate, b.expirationDate));
   return (
     <>
       <PageHeader
@@ -1828,11 +2089,12 @@ function AlertsView({
               <button
                 role="switch"
                 aria-checked={notificationsEnabled}
+                aria-label="Notificaciones del navegador"
                 onClick={onToggleNotifications}
                 className={`relative h-7 w-12 shrink-0 rounded-full ${notificationsEnabled ? 'bg-[#183f33]' : 'bg-[#cfd5d0]'}`}
               >
                 <span
-                  className={`absolute top-1 size-5 rounded-full bg-white shadow transition-transform ${notificationsEnabled ? 'translate-x-1' : '-translate-x-5'}`}
+                  className={`absolute left-1 top-1 size-5 rounded-full bg-white shadow transition-transform ${notificationsEnabled ? 'translate-x-5' : 'translate-x-0'}`}
                 />
               </button>
             </div>
